@@ -1,5 +1,38 @@
 # Changelog
 
+### 0.47.0
+
+**Image:**
+
+- `k8s.gcr.io/ingress-nginx/controller:v0.47.0@sha256:a1e4efc107be0bb78f32eaec37bef17d7a0c81bec8066cdf2572508d21351d0b`
+
+_New Features:_
+
+- [X] [#7137] Add support for custom probes
+
+_Changes:_
+
+- [X] [#7179] Upgrade Nginx to 1.20.1 
+- [X] [#7101] Removed Codecov
+- [X] [#6993] Fix cookieAffinity log printing error
+- [X] [#7046] Allow configuring controller container name
+- [X] [#6994] Fixed oauth2 callback url 
+- [X] [#6740] non-host canary ingress use default server name as host to merge 
+- [X] [#7126] set x-forwarded-scheme to be the same as x-forwarded-proto
+- [X] [#6734] Update controller-poddisruptionbudget.yaml
+- [X] [#7117] Adding annotations for HPA
+
+### 0.46.0
+
+**Image:**
+
+- `k8s.gcr.io/ingress-nginx/controller:v0.46.0@sha256:52f0058bed0a17ab0fb35628ba97e8d52b5d32299fbc03cc0f6c7b9ff036b61a`
+
+_Changes:_
+
+- [#7092](https://github.com/kubernetes/ingress-nginx/pull/7092) Removes the possibility of using localhost in ExternalNames as endpoints
+
+
 ### 0.45.0
 
 **Image:**

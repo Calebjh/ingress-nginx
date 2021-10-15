@@ -264,6 +264,14 @@ apiVersion: v1
 kind: Service
 metadata:
   annotations:
+    service.beta.kubernetes.io/exoscale-loadbalancer-description: NGINX Ingress Controller
+      load balancer
+    service.beta.kubernetes.io/exoscale-loadbalancer-name: nginx-ingress-controller
+    service.beta.kubernetes.io/exoscale-loadbalancer-service-healthcheck-interval: 10s
+    service.beta.kubernetes.io/exoscale-loadbalancer-service-healthcheck-mode: tcp
+    service.beta.kubernetes.io/exoscale-loadbalancer-service-healthcheck-retries: '1'
+    service.beta.kubernetes.io/exoscale-loadbalancer-service-healthcheck-timeout: 3s
+    service.beta.kubernetes.io/exoscale-loadbalancer-service-strategy: source-hash
   labels:
     helm.sh/chart: ingress-nginx-3.33.0
     app.kubernetes.io/name: ingress-nginx
@@ -274,7 +282,8 @@ metadata:
   name: ingress-nginx-controller
   namespace: ingress-nginx
 spec:
-  type: NodePort
+  type: LoadBalancer
+  externalTrafficPolicy: Local
   ports:
     - name: http
       port: 80
@@ -289,9 +298,9 @@ spec:
     app.kubernetes.io/instance: ingress-nginx
     app.kubernetes.io/component: controller
 ---
-# Source: ingress-nginx/templates/controller-deployment.yaml
+# Source: ingress-nginx/templates/controller-daemonset.yaml
 apiVersion: apps/v1
-kind: Deployment
+kind: DaemonSet
 metadata:
   labels:
     helm.sh/chart: ingress-nginx-3.33.0
@@ -309,10 +318,6 @@ spec:
       app.kubernetes.io/instance: ingress-nginx
       app.kubernetes.io/component: controller
   revisionHistoryLimit: 10
-  strategy:
-    rollingUpdate:
-      maxUnavailable: 1
-    type: RollingUpdate
   minReadySeconds: 0
   template:
     metadata:
@@ -333,13 +338,13 @@ spec:
                   - /wait-shutdown
           args:
             - /nginx-ingress-controller
+            - --publish-service=$(POD_NAMESPACE)/ingress-nginx-controller
             - --election-id=ingress-controller-leader
             - --ingress-class=nginx
-            - --configmap=$(POD_NAMESPACE)/ingress-nginx-controller
+            - --configmap=ingress-nginx/ingress-nginx-controller
             - --validating-webhook=:8443
             - --validating-webhook-certificate=/usr/local/certificates/cert
             - --validating-webhook-key=/usr/local/certificates/key
-            - --publish-status-address=localhost
           securityContext:
             capabilities:
               drop:
@@ -383,11 +388,9 @@ spec:
             - name: http
               containerPort: 80
               protocol: TCP
-              hostPort: 80
             - name: https
               containerPort: 443
               protocol: TCP
-              hostPort: 443
             - name: webhook
               containerPort: 8443
               protocol: TCP
@@ -400,14 +403,9 @@ spec:
               cpu: 100m
               memory: 90Mi
       nodeSelector:
-        ingress-ready: 'true'
         kubernetes.io/os: linux
-      tolerations:
-        - effect: NoSchedule
-          key: node-role.kubernetes.io/master
-          operator: Equal
       serviceAccountName: ingress-nginx
-      terminationGracePeriodSeconds: 0
+      terminationGracePeriodSeconds: 300
       volumes:
         - name: webhook-cert
           secret:
