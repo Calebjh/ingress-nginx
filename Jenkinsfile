@@ -22,6 +22,7 @@ pipeline {
     BASE_IMAGE = "${REGISTRY}/${env.IMAGE_NAME}:${TAG}"
     DOCKER_CLI_EXPERIMENTAL = 'enabled'
     GOPATH = "$WORKSPACE"
+    DEBUG=1
   }
   stages {
     stage("Setup docker-ce") {
@@ -69,8 +70,13 @@ pipeline {
     }
     stage("Ingress Unit Tests") {
       steps {
-        dir("$DIRECTORY") {
-          sh "make test"
+        withEnv(["USER=root"]) {
+          dir("$DIRECTORY") {
+            // tests must be run by privileged user
+            // issue in v0.49.x ?
+            sh "make test"
+            sh "sudo rm -rf .cache .modcache"
+          }
         }
       }
     }
