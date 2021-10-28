@@ -23,12 +23,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math/rand" // #nosec
 	"net"
 	"net/url"
 	"os"
-	"os/exec"
 	"reflect"
 	"regexp"
 	"sort"
@@ -50,13 +49,19 @@ import (
 )
 
 const (
-	slash         = "/"
-	nonIdempotent = "non_idempotent"
-	defBufferSize = 65535
+	slash                   = "/"
+	nonIdempotent           = "non_idempotent"
+	defBufferSize           = 65535
+	writeIndentOnEmptyLines = true // backward-compatibility
 )
 
-// TemplateWriter is the interface to render a template
-type TemplateWriter interface {
+const (
+	stateCode = iota
+	stateComment
+)
+
+// Writer is the interface to render a template
+type Writer interface {
 	Write(conf config.TemplateConfig) ([]byte, error)
 }
 
@@ -70,7 +75,7 @@ type Template struct {
 //NewTemplate returns a new Template instance or an
 //error if the specified template file contains errors
 func NewTemplate(file string) (*Template, error) {
-	data, err := ioutil.ReadFile(file)
+	data, err := os.ReadFile(file)
 	if err != nil {
 		return nil, errors.Wrapf(err, "unexpected error reading template %v", file)
 	}
@@ -84,6 +89,87 @@ func NewTemplate(file string) (*Template, error) {
 		tmpl: tmpl,
 		bp:   NewBufferPool(defBufferSize),
 	}, nil
+}
+
+// 1. Removes carriage return symbol (\r)
+// 2. Collapses multiple empty lines to single one
+// 3. Re-indent
+// (ATW: always returns nil)
+func cleanConf(in *bytes.Buffer, out *bytes.Buffer) error {
+	depth := 0
+	lineStarted := false
+	emptyLineWritten := false
+	state := stateCode
+	for {
+		c, err := in.ReadByte()
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err // unreachable
+		}
+
+		needOutput := false
+		nextDepth := depth
+		nextLineStarted := lineStarted
+
+		switch state {
+		case stateCode:
+			switch c {
+			case '{':
+				needOutput = true
+				nextDepth = depth + 1
+				nextLineStarted = true
+			case '}':
+				needOutput = true
+				depth--
+				nextDepth = depth
+				nextLineStarted = true
+			case ' ', '\t':
+				needOutput = lineStarted
+			case '\r':
+			case '\n':
+				needOutput = !(!lineStarted && emptyLineWritten)
+				nextLineStarted = false
+			case '#':
+				needOutput = true
+				nextLineStarted = true
+				state = stateComment
+			default:
+				needOutput = true
+				nextLineStarted = true
+			}
+		case stateComment:
+			switch c {
+			case '\r':
+			case '\n':
+				needOutput = true
+				nextLineStarted = false
+				state = stateCode
+			default:
+				needOutput = true
+			}
+		}
+
+		if needOutput {
+			if !lineStarted && (writeIndentOnEmptyLines || c != '\n') {
+				for i := 0; i < depth; i++ {
+					err = out.WriteByte('\t') // always nil
+					if err != nil {
+						return err
+					}
+				}
+			}
+			emptyLineWritten = !lineStarted
+			err = out.WriteByte(c) // always nil
+			if err != nil {
+				return err
+			}
+		}
+
+		depth = nextDepth
+		lineStarted = nextLineStarted
+	}
 }
 
 // Write populates a buffer using a template with NGINX configuration
@@ -110,12 +196,9 @@ func (t *Template) Write(conf config.TemplateConfig) ([]byte, error) {
 
 	// squeezes multiple adjacent empty lines to be single
 	// spaced this is to avoid the use of regular expressions
-	cmd := exec.Command("/ingress-controller/clean-nginx-conf.sh")
-	cmd.Stdin = tmplBuf
-	cmd.Stdout = outCmdBuf
-	if err := cmd.Run(); err != nil {
-		klog.Warningf("unexpected error cleaning template: %v", err)
-		return tmplBuf.Bytes(), nil
+	err = cleanConf(tmplBuf, outCmdBuf)
+	if err != nil {
+		return nil, err
 	}
 
 	return outCmdBuf.Bytes(), nil
@@ -246,7 +329,8 @@ func buildLuaSharedDictionaries(c interface{}, s interface{}) string {
 	}
 
 	for name, size := range cfg.LuaSharedDicts {
-		out = append(out, fmt.Sprintf("lua_shared_dict %s %dM", name, size))
+		sizeStr := dictKbToStr(size)
+		out = append(out, fmt.Sprintf("lua_shared_dict %s %s", name, sizeStr))
 	}
 
 	sort.Strings(out)
@@ -258,16 +342,16 @@ func luaConfigurationRequestBodySize(c interface{}) string {
 	cfg, ok := c.(config.Configuration)
 	if !ok {
 		klog.Errorf("expected a 'config.Configuration' type but %T was returned", c)
-		return "100" // just a default number
+		return "100M" // just a default number
 	}
 
 	size := cfg.LuaSharedDicts["configuration_data"]
 	if size < cfg.LuaSharedDicts["certificate_data"] {
 		size = cfg.LuaSharedDicts["certificate_data"]
 	}
-	size = size + 1
+	size = size + 1024
 
-	return fmt.Sprintf("%d", size)
+	return dictKbToStr(size)
 }
 
 // configForLua returns some general configuration as Lua table represented as string
@@ -480,7 +564,7 @@ func shouldApplyGlobalAuth(input interface{}, globalExternalAuthURL string) bool
 	return false
 }
 
-func buildAuthResponseHeaders(headers []string) []string {
+func buildAuthResponseHeaders(proxySetHeader string, headers []string) []string {
 	res := []string{}
 
 	if len(headers) == 0 {
@@ -491,7 +575,7 @@ func buildAuthResponseHeaders(headers []string) []string {
 		hvar := strings.ToLower(h)
 		hvar = strings.NewReplacer("-", "_").Replace(hvar)
 		res = append(res, fmt.Sprintf("auth_request_set $authHeader%v $upstream_http_%v;", i, hvar))
-		res = append(res, fmt.Sprintf("proxy_set_header '%v' $authHeader%v;", h, i))
+		res = append(res, fmt.Sprintf("%s '%v' $authHeader%v;", proxySetHeader, h, i))
 	}
 	return res
 }
@@ -533,6 +617,8 @@ func buildProxyPass(host string, b interface{}, loc interface{}) string {
 	proxyPass := "proxy_pass"
 
 	switch location.BackendProtocol {
+	case "AUTO_HTTP":
+		proto = "$scheme://"
 	case "HTTPS":
 		proto = "https://"
 	case "GRPC":
@@ -583,7 +669,7 @@ func buildProxyPass(host string, b interface{}, loc interface{}) string {
 		var xForwardedPrefix string
 
 		if len(location.XForwardedPrefix) > 0 {
-			xForwardedPrefix = fmt.Sprintf("proxy_set_header X-Forwarded-Prefix \"%s\";\n", location.XForwardedPrefix)
+			xForwardedPrefix = fmt.Sprintf("%s X-Forwarded-Prefix \"%s\";\n", proxySetHeader(location), location.XForwardedPrefix)
 		}
 
 		return fmt.Sprintf(`
@@ -1017,7 +1103,7 @@ func buildOpentracing(c interface{}, s interface{}) string {
 	buf := bytes.NewBufferString("")
 
 	if cfg.DatadogCollectorHost != "" {
-		buf.WriteString("opentracing_load_tracer /usr/local/lib64/libdd_opentracing.so /etc/nginx/opentracing.json;")
+		buf.WriteString("opentracing_load_tracer /usr/local/lib/libdd_opentracing.so /etc/nginx/opentracing.json;")
 	} else if cfg.ZipkinCollectorHost != "" {
 		buf.WriteString("opentracing_load_tracer /usr/local/lib/libzipkin_opentracing_plugin.so /etc/nginx/opentracing.json;")
 	} else if cfg.JaegerCollectorHost != "" || cfg.JaegerEndpoint != "" {
