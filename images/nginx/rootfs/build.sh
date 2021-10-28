@@ -192,6 +192,10 @@ yum -y install \
   lmdb-libs \
   lmdb-devel
 
+# remove lua shipped with amazon linux due to version clash
+# should use downloaded lua
+rpm -e --nodeps lua
+
 mkdir -p /etc/nginx
 
 mkdir --verbose -p "$BUILD_PATH"
