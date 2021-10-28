@@ -22,7 +22,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/asn1"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -42,8 +42,10 @@ import (
 	"k8s.io/ingress-nginx/internal/ingress"
 	"k8s.io/ingress-nginx/internal/ingress/annotations"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/canary"
+	"k8s.io/ingress-nginx/internal/ingress/annotations/ipwhitelist"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/parser"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/proxyssl"
+	"k8s.io/ingress-nginx/internal/ingress/annotations/sessionaffinity"
 	"k8s.io/ingress-nginx/internal/ingress/controller/config"
 	ngx_config "k8s.io/ingress-nginx/internal/ingress/controller/config"
 	"k8s.io/ingress-nginx/internal/ingress/controller/store"
@@ -55,11 +57,12 @@ import (
 )
 
 type fakeIngressStore struct {
-	ingresses []*ingress.Ingress
+	ingresses     []*ingress.Ingress
+	configuration ngx_config.Configuration
 }
 
-func (fakeIngressStore) GetBackendConfiguration() ngx_config.Configuration {
-	return ngx_config.Configuration{}
+func (fis fakeIngressStore) GetBackendConfiguration() ngx_config.Configuration {
+	return fis.configuration
 }
 
 func (fakeIngressStore) GetConfigMap(key string) (*corev1.ConfigMap, error) {
@@ -122,7 +125,7 @@ func (ntc testNginxTestCommand) Test(cfg string) ([]byte, error) {
 		return nil, err
 	}
 	defer fd.Close()
-	bytes, err := ioutil.ReadAll(fd)
+	bytes, err := io.ReadAll(fd)
 	if err != nil {
 		ntc.t.Errorf("could not read generated nginx configuration: %v", err.Error())
 	}
@@ -245,6 +248,9 @@ func TestCheckIngress(t *testing.T) {
 		})
 
 		t.Run("When the default annotation prefix is used despite an override", func(t *testing.T) {
+			defer func() {
+				parser.AnnotationsPrefix = "nginx.ingress.kubernetes.io"
+			}()
 			parser.AnnotationsPrefix = "ingress.kubernetes.io"
 			ing.ObjectMeta.Annotations["nginx.ingress.kubernetes.io/backend-protocol"] = "GRPC"
 			nginx.command = testNginxTestCommand{
@@ -253,6 +259,23 @@ func TestCheckIngress(t *testing.T) {
 			}
 			if nginx.CheckIngress(ing) == nil {
 				t.Errorf("with a custom annotation prefix, ingresses using the default should be rejected")
+			}
+		})
+
+		t.Run("When snippets are disabled and user tries to use snippet annotation", func(t *testing.T) {
+			nginx.store = fakeIngressStore{
+				ingresses: []*ingress.Ingress{},
+				configuration: ngx_config.Configuration{
+					AllowSnippetAnnotations: false,
+				},
+			}
+			nginx.command = testNginxTestCommand{
+				t:   t,
+				err: nil,
+			}
+			ing.ObjectMeta.Annotations["nginx.ingress.kubernetes.io/server-snippet"] = "bla"
+			if err := nginx.CheckIngress(ing); err == nil {
+				t.Errorf("with a snippet annotation, ingresses using the default should be rejected")
 			}
 		})
 
@@ -283,6 +306,9 @@ func TestCheckIngress(t *testing.T) {
 		})
 
 		t.Run("When the ingress is in a different namespace than the watched one", func(t *testing.T) {
+			defer func() {
+				nginx.cfg.Namespace = "test-namespace"
+			}()
 			nginx.command = testNginxTestCommand{
 				t:   t,
 				err: fmt.Errorf("test error"),
@@ -293,6 +319,16 @@ func TestCheckIngress(t *testing.T) {
 				t.Errorf("with a new ingress without error, no error should be returned")
 			}
 		})
+	})
+
+	t.Run("When the ingress is marked as deleted", func(t *testing.T) {
+		ing.DeletionTimestamp = &metav1.Time{
+			Time: time.Now(),
+		}
+
+		if nginx.CheckIngress(ing) != nil {
+			t.Errorf("when the ingress is marked as deleted, no error should be returned")
+		}
 	})
 }
 
@@ -776,6 +812,326 @@ func TestMergeAlternativeBackends(t *testing.T) {
 				},
 			},
 		},
+		"alternative backend gets SessionAffinitySettings configured when CanaryBehavior is 'sticky'": {
+			&ingress.Ingress{
+				Ingress: networking.Ingress{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "example",
+					},
+					Spec: networking.IngressSpec{
+						Rules: []networking.IngressRule{
+							{
+								Host: "example.com",
+								IngressRuleValue: networking.IngressRuleValue{
+									HTTP: &networking.HTTPIngressRuleValue{
+										Paths: []networking.HTTPIngressPath{
+											{
+												Path:     "/",
+												PathType: &pathTypePrefix,
+												Backend: networking.IngressBackend{
+													ServiceName: "http-svc-canary",
+													ServicePort: intstr.IntOrString{
+														IntVal: 80,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				ParsedAnnotations: &annotations.Ingress{
+					SessionAffinity: sessionaffinity.Config{
+						CanaryBehavior: "sticky",
+					},
+				},
+			},
+			map[string]*ingress.Backend{
+				"example-http-svc-80": {
+					Name:     "example-http-svc-80",
+					NoServer: false,
+					SessionAffinity: ingress.SessionAffinityConfig{
+						AffinityType: "cookie",
+						AffinityMode: "balanced",
+						CookieSessionAffinity: ingress.CookieSessionAffinity{
+							Name: "test",
+						},
+					},
+				},
+				"example-http-svc-canary-80": {
+					Name:     "example-http-svc-canary-80",
+					NoServer: true,
+					TrafficShapingPolicy: ingress.TrafficShapingPolicy{
+						Weight: 20,
+					},
+				},
+			},
+			map[string]*ingress.Server{
+				"example.com": {
+					Hostname: "example.com",
+					Locations: []*ingress.Location{
+						{
+							Path:     "/",
+							PathType: &pathTypePrefix,
+							Backend:  "example-http-svc-80",
+						},
+					},
+				},
+			},
+			map[string]*ingress.Backend{
+				"example-http-svc-80": {
+					Name:                "example-http-svc-80",
+					NoServer:            false,
+					AlternativeBackends: []string{"example-http-svc-canary-80"},
+					SessionAffinity: ingress.SessionAffinityConfig{
+						AffinityType: "cookie",
+						AffinityMode: "balanced",
+						CookieSessionAffinity: ingress.CookieSessionAffinity{
+							Name: "test",
+						},
+					},
+				},
+				"example-http-svc-canary-80": {
+					Name:     "example-http-svc-canary-80",
+					NoServer: true,
+					TrafficShapingPolicy: ingress.TrafficShapingPolicy{
+						Weight: 20,
+					},
+					SessionAffinity: ingress.SessionAffinityConfig{
+						AffinityType: "cookie",
+						AffinityMode: "balanced",
+						CookieSessionAffinity: ingress.CookieSessionAffinity{
+							Name: "test",
+						},
+					},
+				},
+			},
+			map[string]*ingress.Server{
+				"example.com": {
+					Hostname: "example.com",
+					Locations: []*ingress.Location{
+						{
+							Path:     "/",
+							PathType: &pathTypePrefix,
+							Backend:  "example-http-svc-80",
+						},
+					},
+				},
+			},
+		},
+		"alternative backend gets SessionAffinitySettings configured when CanaryBehavior is not 'legacy'": {
+			&ingress.Ingress{
+				Ingress: networking.Ingress{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "example",
+					},
+					Spec: networking.IngressSpec{
+						Rules: []networking.IngressRule{
+							{
+								Host: "example.com",
+								IngressRuleValue: networking.IngressRuleValue{
+									HTTP: &networking.HTTPIngressRuleValue{
+										Paths: []networking.HTTPIngressPath{
+											{
+												Path:     "/",
+												PathType: &pathTypePrefix,
+												Backend: networking.IngressBackend{
+													ServiceName: "http-svc-canary",
+													ServicePort: intstr.IntOrString{
+														IntVal: 80,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				ParsedAnnotations: &annotations.Ingress{
+					SessionAffinity: sessionaffinity.Config{
+						CanaryBehavior: "", // In fact any value but 'legacy' would do the trick.
+					},
+				},
+			},
+			map[string]*ingress.Backend{
+				"example-http-svc-80": {
+					Name:     "example-http-svc-80",
+					NoServer: false,
+					SessionAffinity: ingress.SessionAffinityConfig{
+						AffinityType: "cookie",
+						AffinityMode: "balanced",
+						CookieSessionAffinity: ingress.CookieSessionAffinity{
+							Name: "test",
+						},
+					},
+				},
+				"example-http-svc-canary-80": {
+					Name:     "example-http-svc-canary-80",
+					NoServer: true,
+					TrafficShapingPolicy: ingress.TrafficShapingPolicy{
+						Weight: 20,
+					},
+				},
+			},
+			map[string]*ingress.Server{
+				"example.com": {
+					Hostname: "example.com",
+					Locations: []*ingress.Location{
+						{
+							Path:     "/",
+							PathType: &pathTypePrefix,
+							Backend:  "example-http-svc-80",
+						},
+					},
+				},
+			},
+			map[string]*ingress.Backend{
+				"example-http-svc-80": {
+					Name:                "example-http-svc-80",
+					NoServer:            false,
+					AlternativeBackends: []string{"example-http-svc-canary-80"},
+					SessionAffinity: ingress.SessionAffinityConfig{
+						AffinityType: "cookie",
+						AffinityMode: "balanced",
+						CookieSessionAffinity: ingress.CookieSessionAffinity{
+							Name: "test",
+						},
+					},
+				},
+				"example-http-svc-canary-80": {
+					Name:     "example-http-svc-canary-80",
+					NoServer: true,
+					TrafficShapingPolicy: ingress.TrafficShapingPolicy{
+						Weight: 20,
+					},
+					SessionAffinity: ingress.SessionAffinityConfig{
+						AffinityType: "cookie",
+						AffinityMode: "balanced",
+						CookieSessionAffinity: ingress.CookieSessionAffinity{
+							Name: "test",
+						},
+					},
+				},
+			},
+			map[string]*ingress.Server{
+				"example.com": {
+					Hostname: "example.com",
+					Locations: []*ingress.Location{
+						{
+							Path:     "/",
+							PathType: &pathTypePrefix,
+							Backend:  "example-http-svc-80",
+						},
+					},
+				},
+			},
+		},
+		"alternative backend doesn't get SessionAffinitySettings configured when CanaryBehavior is 'legacy'": {
+			&ingress.Ingress{
+				Ingress: networking.Ingress{
+					ObjectMeta: metav1.ObjectMeta{
+						Namespace: "example",
+					},
+					Spec: networking.IngressSpec{
+						Rules: []networking.IngressRule{
+							{
+								Host: "example.com",
+								IngressRuleValue: networking.IngressRuleValue{
+									HTTP: &networking.HTTPIngressRuleValue{
+										Paths: []networking.HTTPIngressPath{
+											{
+												Path:     "/",
+												PathType: &pathTypePrefix,
+												Backend: networking.IngressBackend{
+													ServiceName: "http-svc-canary",
+													ServicePort: intstr.IntOrString{
+														IntVal: 80,
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+				ParsedAnnotations: &annotations.Ingress{
+					SessionAffinity: sessionaffinity.Config{
+						CanaryBehavior: "legacy",
+					},
+				},
+			},
+			map[string]*ingress.Backend{
+				"example-http-svc-80": {
+					Name:     "example-http-svc-80",
+					NoServer: false,
+					SessionAffinity: ingress.SessionAffinityConfig{
+						AffinityType: "cookie",
+						AffinityMode: "balanced",
+						CookieSessionAffinity: ingress.CookieSessionAffinity{
+							Name: "test",
+						},
+					},
+				},
+				"example-http-svc-canary-80": {
+					Name:     "example-http-svc-canary-80",
+					NoServer: true,
+					TrafficShapingPolicy: ingress.TrafficShapingPolicy{
+						Weight: 20,
+					},
+				},
+			},
+			map[string]*ingress.Server{
+				"example.com": {
+					Hostname: "example.com",
+					Locations: []*ingress.Location{
+						{
+							Path:     "/",
+							PathType: &pathTypePrefix,
+							Backend:  "example-http-svc-80",
+						},
+					},
+				},
+			},
+			map[string]*ingress.Backend{
+				"example-http-svc-80": {
+					Name:                "example-http-svc-80",
+					NoServer:            false,
+					AlternativeBackends: []string{"example-http-svc-canary-80"},
+					SessionAffinity: ingress.SessionAffinityConfig{
+						AffinityType: "cookie",
+						AffinityMode: "balanced",
+						CookieSessionAffinity: ingress.CookieSessionAffinity{
+							Name: "test",
+						},
+					},
+				},
+				"example-http-svc-canary-80": {
+					Name:     "example-http-svc-canary-80",
+					NoServer: true,
+					TrafficShapingPolicy: ingress.TrafficShapingPolicy{
+						Weight: 20,
+					},
+				},
+			},
+			map[string]*ingress.Server{
+				"example.com": {
+					Hostname: "example.com",
+					Locations: []*ingress.Location{
+						{
+							Path:     "/",
+							PathType: &pathTypePrefix,
+							Backend:  "example-http-svc-80",
+						},
+					},
+				},
+			},
+		},
 	}
 
 	for title, tc := range testCases {
@@ -791,7 +1147,7 @@ func TestMergeAlternativeBackends(t *testing.T) {
 				if !actualUpstream.Equal(expUpstream) {
 					t.Logf("actual upstream %s alternative backends: %s", actualUpstream.Name, actualUpstream.AlternativeBackends)
 					t.Logf("expected upstream %s alternative backends: %s", expUpstream.Name, expUpstream.AlternativeBackends)
-					t.Errorf("upstream %s was not equal to what was expected: ", upsName)
+					t.Errorf("upstream %s was not equal to what was expected", actualUpstream.Name)
 				}
 			}
 
@@ -1740,6 +2096,83 @@ func TestGetBackendServers(t *testing.T) {
 					},
 					Data: map[string]string{
 						"proxy-ssl-location-only": "true",
+					},
+				}
+			},
+		},
+		{
+			Ingresses: []*ingress.Ingress{
+				{
+					Ingress: networking.Ingress{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "not-allowed-snippet",
+							Namespace: "default",
+							Annotations: map[string]string{
+								"nginx.ingress.kubernetes.io/server-snippet":         "bla",
+								"nginx.ingress.kubernetes.io/configuration-snippet":  "blo",
+								"nginx.ingress.kubernetes.io/whitelist-source-range": "10.0.0.0/24",
+							},
+						},
+						Spec: networking.IngressSpec{
+							Rules: []networking.IngressRule{
+								{
+									Host: "example.com",
+									IngressRuleValue: networking.IngressRuleValue{
+										HTTP: &networking.HTTPIngressRuleValue{
+											Paths: []networking.HTTPIngressPath{
+												{
+													Path:     "/path1",
+													PathType: &pathTypePrefix,
+													Backend: networking.IngressBackend{
+														ServiceName: "path1-svc",
+														ServicePort: intstr.IntOrString{
+															Type:   intstr.Int,
+															IntVal: 80,
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+					ParsedAnnotations: &annotations.Ingress{
+						Whitelist:            ipwhitelist.SourceRange{CIDR: []string{"10.0.0.0/24"}},
+						ServerSnippet:        "bla",
+						ConfigurationSnippet: "blo",
+					},
+				},
+			},
+			Validate: func(ingresses []*ingress.Ingress, upstreams []*ingress.Backend, servers []*ingress.Server) {
+				if len(servers) != 2 {
+					t.Errorf("servers count should be 2, got %d", len(servers))
+					return
+				}
+				s := servers[1]
+
+				if s.ServerSnippet != "" {
+					t.Errorf("server snippet should be empty, got '%s'", s.ServerSnippet)
+				}
+
+				if s.Locations[0].ConfigurationSnippet != "" {
+					t.Errorf("config snippet should be empty, got '%s'", s.Locations[0].ConfigurationSnippet)
+				}
+
+				if len(s.Locations[0].Whitelist.CIDR) != 1 || s.Locations[0].Whitelist.CIDR[0] != "10.0.0.0/24" {
+					t.Errorf("allow list was incorrectly dropped, len should be 1 and contain 10.0.0.0/24")
+				}
+
+			},
+			SetConfigMap: func(ns string) *v1.ConfigMap {
+				return &v1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:     "config",
+						SelfLink: fmt.Sprintf("/api/v1/namespaces/%s/configmaps/config", ns),
+					},
+					Data: map[string]string{
+						"allow-snippet-annotations": "false",
 					},
 				}
 			},

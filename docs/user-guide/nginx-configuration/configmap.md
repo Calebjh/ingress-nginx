@@ -5,7 +5,7 @@ ConfigMaps allow you to decouple configuration artifacts from image content to k
 The ConfigMap API resource stores configuration data as key-value pairs. The data provides the configurations for system
 components for the nginx-controller.
 
-In order to overwrite nginx-controller configuration values as seen in [config.go](https://github.com/kubernetes/ingress-nginx/blob/master/internal/ingress/controller/config/config.go),
+In order to overwrite nginx-controller configuration values as seen in [config.go](https://github.com/kubernetes/ingress-nginx/blob/main/internal/ingress/controller/config/config.go),
 you can add key-value pairs to the data section of the config-map. For Example:
 
 ```yaml
@@ -29,6 +29,7 @@ The following table shows a configuration option's name, type, and the default v
 |:---|:---|:------|
 |[add-headers](#add-headers)|string|""|
 |[allow-backend-server-header](#allow-backend-server-header)|bool|"false"|
+|[allow-snippet-annotations](#allow-snippet-annotations)|bool|true|
 |[hide-headers](#hide-headers)|string array|empty|
 |[access-log-params](#access-log-params)|string|""|
 |[access-log-path](#access-log-path)|string|"/var/log/nginx/access.log"|
@@ -203,11 +204,18 @@ The following table shows a configuration option's name, type, and the default v
 
 ## add-headers
 
-Sets custom headers from named configmap before sending traffic to the client. See [proxy-set-headers](#proxy-set-headers). [example](https://github.com/kubernetes/ingress-nginx/tree/master/docs/examples/customization/custom-headers)
+Sets custom headers from named configmap before sending traffic to the client. See [proxy-set-headers](#proxy-set-headers). [example](https://github.com/kubernetes/ingress-nginx/tree/main/docs/examples/customization/custom-headers)
 
 ## allow-backend-server-header
 
 Enables the return of the header Server from the backend instead of the generic nginx string. _**default:**_ is disabled
+
+## allow-snippet-annotations
+
+Enables Ingress to parse and add *-snippet annotations/directives created by the user. _**default:**_ `true`;
+
+Warning: We recommend enabling this option only if you TRUST users with permission to create Ingress objects, as this 
+may allow a user to add restricted configurations to the final nginx.conf file
 
 ## hide-headers
 
@@ -385,7 +393,7 @@ Sets the time, in seconds, that the browser should remember that this site is on
 
 ## hsts-preload
 
-Enables or disables the preload attribute in the HSTS feature (when it is enabled) dd
+Enables or disables the preload attribute in the HSTS feature (when it is enabled).
 
 ## keep-alive
 
@@ -465,7 +473,7 @@ _**default:**_ "0.0.0.0/0"
 
 ## proxy-set-headers
 
-Sets custom headers from named configmap before sending traffic to backends. The value format is namespace/name.  See [example](https://github.com/kubernetes/ingress-nginx/tree/master/docs/examples/customization/custom-headers)
+Sets custom headers from named configmap before sending traffic to backends. The value format is namespace/name.  See [example](https://github.com/kubernetes/ingress-nginx/tree/main/docs/examples/customization/custom-headers)
 
 ## server-name-hash-max-size
 
@@ -508,7 +516,7 @@ _References:_
 
 ## plugins
 
-Activates plugins installed in `/etc/nginx/lua/plugins`. Refer to [ingress-nginx plugins README](https://github.com/kubernetes/ingress-nginx/blob/master/rootfs/etc/nginx/lua/plugins/README.md) for more information on how to write and install a plugin.
+Activates plugins installed in `/etc/nginx/lua/plugins`. Refer to [ingress-nginx plugins README](https://github.com/kubernetes/ingress-nginx/blob/main/rootfs/etc/nginx/lua/plugins/README.md) for more information on how to write and install a plugin.
 
 ## server-tokens
 
@@ -523,7 +531,7 @@ The default cipher list is:
 
 The ordering of a ciphersuite is very important because it decides which algorithms are going to be selected in priority. The recommendation above prioritizes algorithms that provide perfect [forward secrecy](https://wiki.mozilla.org/Security/Server_Side_TLS#Forward_Secrecy).
 
-DHE-based cyphers will not be available until DH parameter is configured [Custom DH parameters for perfect forward secrecy](https://github.com/kubernetes/ingress-nginx/tree/master/docs/examples/customization/ssl-dh-param)
+DHE-based cyphers will not be available until DH parameter is configured [Custom DH parameters for perfect forward secrecy](https://github.com/kubernetes/ingress-nginx/tree/main/docs/examples/customization/ssl-dh-param)
 
 Please check the [Mozilla SSL Configuration Generator](https://mozilla.github.io/server-side-tls/ssl-config-generator/).
 
@@ -681,7 +689,7 @@ Sets the algorithm to use for load balancing.
 The value can either be:
 
 - round_robin: to use the default round robin loadbalancer
-- ewma: to use the Peak EWMA method for routing ([implementation](https://github.com/kubernetes/ingress-nginx/blob/master/rootfs/etc/nginx/lua/balancer/ewma.lua))
+- ewma: to use the Peak EWMA method for routing ([implementation](https://github.com/kubernetes/ingress-nginx/blob/main/rootfs/etc/nginx/lua/balancer/ewma.lua))
 
 The default is `round_robin`.
 
@@ -1046,6 +1054,12 @@ For example following will set default `certificate_data` dictionary to `100M` a
 lua-shared-dicts: "certificate_data: 100, my_custom_plugin: 5"
 ```
 
+You can optionally set a size unit to allow for kilobyte-granularity. Allowed units are 'm' or 'k' (case-insensitive), and it defaults to MB if no unit is provided. Here is a similar example, but the `my_custom_plugin` dict is only 512KB.
+
+```
+lua-shared-dicts: "certificate_data: 100, my_custom_plugin: 512k"
+```
+
 _References:_
 [http://nginx.org/en/docs/http/ngx_http_core_module.html#limit_rate_after](http://nginx.org/en/docs/http/ngx_http_core_module.html#limit_rate_after)
 
@@ -1083,7 +1097,7 @@ Similar to the Ingress rule annotation `nginx.ingress.kubernetes.io/auth-url`.
 Locations that should not get authenticated can be listed using `no-auth-locations` See [no-auth-locations](#no-auth-locations). In addition, each service can be excluded from authentication via annotation `enable-global-auth` set to "false".
 _**default:**_ ""
 
-_References:_ [https://github.com/kubernetes/ingress-nginx/blob/master/docs/user-guide/nginx-configuration/annotations.md#external-authentication](https://github.com/kubernetes/ingress-nginx/blob/master/docs/user-guide/nginx-configuration/annotations.md#external-authentication)
+_References:_ [https://github.com/kubernetes/ingress-nginx/blob/main/docs/user-guide/nginx-configuration/annotations.md#external-authentication](https://github.com/kubernetes/ingress-nginx/blob/main/docs/user-guide/nginx-configuration/annotations.md#external-authentication)
 
 ## global-auth-method
 
@@ -1174,7 +1188,7 @@ _References:_
 
 * `global-rate-limit-status-code`: configure HTTP status code to return when rejecting requests. Defaults to 429.
 
-Configure `memcached` client for [Global Rate Limiting](https://github.com/kubernetes/ingress-nginx/blob/master/docs/user-guide/nginx-configuration/annotations.md#global-rate-limiting).
+Configure `memcached` client for [Global Rate Limiting](https://github.com/kubernetes/ingress-nginx/blob/main/docs/user-guide/nginx-configuration/annotations.md#global-rate-limiting).
 
 * `global-rate-limit-memcached-host`: IP/FQDN of memcached server to use. Required to enable Global Rate Limiting.
 * `global-rate-limit-memcached-port`: port of memcached server to use. Defaults default memcached port of `11211`.

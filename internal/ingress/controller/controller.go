@@ -85,6 +85,8 @@ type Configuration struct {
 
 	ListenPorts *ngx_config.ListenPorts
 
+	DisableServiceExternalName bool
+
 	EnableSSLPassthrough bool
 
 	EnableProfiling bool
@@ -103,7 +105,7 @@ type Configuration struct {
 	ValidationWebhookKeyPath  string
 
 	GlobalExternalAuth  *ngx_config.GlobalExternalAuth
-	MaxmindEditionFiles []string
+	MaxmindEditionFiles *[]string
 
 	MonitorMaxBatchSize int
 
@@ -214,6 +216,11 @@ func (n *NGINXController) CheckIngress(ing *networking.Ingress) error {
 		return nil
 	}
 
+	// Skip checks if the ingress is marked as deleted
+	if !ing.DeletionTimestamp.IsZero() {
+		return nil
+	}
+
 	if !class.IsValid(ing) {
 		klog.Warningf("ignoring ingress %v in %v based on annotation %v", ing.Name, ing.ObjectMeta.Namespace, class.IngressKey)
 		return nil
@@ -228,26 +235,27 @@ func (n *NGINXController) CheckIngress(ing *networking.Ingress) error {
 		return fmt.Errorf("This deployment is trying to create a catch-all ingress while DisableCatchAll flag is set to true. Remove '.spec.backend' or set DisableCatchAll flag to false.")
 	}
 
-	if parser.AnnotationsPrefix != parser.DefaultAnnotationsPrefix {
-		for key := range ing.ObjectMeta.GetAnnotations() {
+	cfg := n.store.GetBackendConfiguration()
+	cfg.Resolver = n.resolver
+
+	for key := range ing.ObjectMeta.GetAnnotations() {
+		if parser.AnnotationsPrefix != parser.DefaultAnnotationsPrefix {
 			if strings.HasPrefix(key, fmt.Sprintf("%s/", parser.DefaultAnnotationsPrefix)) {
 				return fmt.Errorf("This deployment has a custom annotation prefix defined. Use '%s' instead of '%s'", parser.AnnotationsPrefix, parser.DefaultAnnotationsPrefix)
 			}
 		}
+
+		if !cfg.AllowSnippetAnnotations && strings.HasSuffix(key, "-snippet") {
+			return fmt.Errorf("%s annotation cannot be used. Snippet directives are disabled by the Ingress administrator", key)
+		}
+
+		if len(cfg.GlobalRateLimitMemcachedHost) == 0 && strings.HasPrefix(key, fmt.Sprintf("%s/%s", parser.AnnotationsPrefix, "global-rate-limit")) {
+			return fmt.Errorf("'global-rate-limit*' annotations require 'global-rate-limit-memcached-host' settings configured in the global configmap")
+		}
+
 	}
 
 	k8s.SetDefaultNGINXPathType(ing)
-
-	cfg := n.store.GetBackendConfiguration()
-	cfg.Resolver = n.resolver
-
-	if len(cfg.GlobalRateLimitMemcachedHost) == 0 {
-		for key := range ing.ObjectMeta.GetAnnotations() {
-			if strings.HasPrefix(key, fmt.Sprintf("%s/%s", parser.AnnotationsPrefix, "global-rate-limit")) {
-				return fmt.Errorf("'global-rate-limit*' annotations require 'global-rate-limit-memcached-host' settings configured in the global configmap")
-			}
-		}
-	}
 
 	allIngresses := n.store.ListIngresses()
 
@@ -501,6 +509,30 @@ func (n *NGINXController) getConfiguration(ingresses []*ingress.Ingress) (sets.S
 	}
 }
 
+func dropSnippetDirectives(anns *annotations.Ingress, ingKey string) {
+	if anns != nil {
+		if anns.ConfigurationSnippet != "" {
+			klog.V(3).Infof("Ingress %q tried to use configuration-snippet and the annotation is disabled by the admin. Removing the annotation", ingKey)
+			anns.ConfigurationSnippet = ""
+		}
+		if anns.ServerSnippet != "" {
+			klog.V(3).Infof("Ingress %q tried to use server-snippet and the annotation is disabled by the admin. Removing the annotation", ingKey)
+			anns.ServerSnippet = ""
+		}
+
+		if anns.ModSecurity.Snippet != "" {
+			klog.V(3).Infof("Ingress %q tried to use modsecurity-snippet and the annotation is disabled by the admin. Removing the annotation", ingKey)
+			anns.ModSecurity.Snippet = ""
+		}
+
+		if anns.ExternalAuth.AuthSnippet != "" {
+			klog.V(3).Infof("Ingress %q tried to use auth-snippet and the annotation is disabled by the admin. Removing the annotation", ingKey)
+			anns.ExternalAuth.AuthSnippet = ""
+		}
+
+	}
+}
+
 // getBackendServers returns a list of Upstream and Server to be used by the
 // backend.  An upstream can be used in multiple servers if the namespace,
 // service name and port are the same.
@@ -514,6 +546,10 @@ func (n *NGINXController) getBackendServers(ingresses []*ingress.Ingress) ([]*in
 	for _, ing := range ingresses {
 		ingKey := k8s.MetaNamespaceKey(ing)
 		anns := ing.ParsedAnnotations
+
+		if !n.store.GetBackendConfiguration().AllowSnippetAnnotations {
+			dropSnippetDirectives(anns, ingKey)
+		}
 
 		for _, rule := range ing.Spec.Rules {
 			host := rule.Host
@@ -717,7 +753,7 @@ func (n *NGINXController) getBackendServers(ingresses []*ingress.Ingress) ([]*in
 				endps := getEndpoints(location.DefaultBackend, &sp, apiv1.ProtocolTCP, n.store.GetServiceEndpoints)
 				// custom backend is valid only if contains at least one endpoint
 				if len(endps) > 0 {
-					name := fmt.Sprintf("custom-default-backend-%v", location.DefaultBackend.GetName())
+					name := fmt.Sprintf("custom-default-backend-%v-%v", location.DefaultBackend.GetNamespace(), location.DefaultBackend.GetName())
 					klog.V(3).Infof("Creating \"%v\" upstream based on default backend annotation", name)
 
 					nb := upstream.DeepCopy()
@@ -782,6 +818,11 @@ func (n *NGINXController) createUpstreams(data []*ingress.Ingress, du *ingress.B
 
 	for _, ing := range data {
 		anns := ing.ParsedAnnotations
+		ingKey := k8s.MetaNamespaceKey(ing)
+
+		if !n.store.GetBackendConfiguration().AllowSnippetAnnotations {
+			dropSnippetDirectives(anns, ingKey)
+		}
 
 		var defBackend string
 		if ing.Spec.Backend != nil {
@@ -958,6 +999,10 @@ func (n *NGINXController) serviceEndpoints(svcKey, backendPort string) ([]ingres
 
 	// Ingress with an ExternalName Service and no port defined for that Service
 	if svc.Spec.Type == apiv1.ServiceTypeExternalName {
+		if n.cfg.DisableServiceExternalName {
+			klog.Warningf("Service %q of type ExternalName not allowed due to Ingress configuration.", svcKey)
+			return upstreams, nil
+		}
 		servicePort := externalNamePorts(backendPort, svc)
 		endps := getEndpoints(svc, servicePort, apiv1.ProtocolTCP, n.store.GetServiceEndpoints)
 		if len(endps) == 0 {
@@ -1058,6 +1103,10 @@ func (n *NGINXController) createServers(data []*ingress.Ingress,
 		ingKey := k8s.MetaNamespaceKey(ing)
 		anns := ing.ParsedAnnotations
 
+		if !n.store.GetBackendConfiguration().AllowSnippetAnnotations {
+			dropSnippetDirectives(anns, ingKey)
+		}
+
 		// default upstream name
 		un := du.Name
 
@@ -1133,6 +1182,10 @@ func (n *NGINXController) createServers(data []*ingress.Ingress,
 	for _, ing := range data {
 		ingKey := k8s.MetaNamespaceKey(ing)
 		anns := ing.ParsedAnnotations
+
+		if !n.store.GetBackendConfiguration().AllowSnippetAnnotations {
+			dropSnippetDirectives(anns, ingKey)
+		}
 
 		if anns.Canary.Enabled {
 			klog.V(2).Infof("Ingress %v is marked as Canary, ignoring", ingKey)
@@ -1304,7 +1357,7 @@ func canMergeBackend(primary *ingress.Backend, alternative *ingress.Backend) boo
 }
 
 // Performs the merge action and checks to ensure that one two alternative backends do not merge into each other
-func mergeAlternativeBackend(priUps *ingress.Backend, altUps *ingress.Backend) bool {
+func mergeAlternativeBackend(ing *ingress.Ingress, priUps *ingress.Backend, altUps *ingress.Backend) bool {
 	if priUps.NoServer {
 		klog.Warningf("unable to merge alternative backend %v into primary backend %v because %v is a primary backend",
 			altUps.Name, priUps.Name, priUps.Name)
@@ -1316,6 +1369,10 @@ func mergeAlternativeBackend(priUps *ingress.Backend, altUps *ingress.Backend) b
 			klog.V(2).Infof("skip merge alternative backend %v into %v, it's already present", altUps.Name, priUps.Name)
 			return true
 		}
+	}
+
+	if ing.ParsedAnnotations != nil && ing.ParsedAnnotations.SessionAffinity.CanaryBehavior != "legacy" {
+		priUps.SessionAffinity.DeepCopyInto(&altUps.SessionAffinity)
 	}
 
 	priUps.AlternativeBackends =
@@ -1357,7 +1414,7 @@ func mergeAlternativeBackends(ing *ingress.Ingress, upstreams map[string]*ingres
 					klog.V(2).Infof("matching backend %v found for alternative backend %v",
 						priUps.Name, altUps.Name)
 
-					merged = mergeAlternativeBackend(priUps, altUps)
+					merged = mergeAlternativeBackend(ing, priUps, altUps)
 				}
 			}
 
@@ -1410,7 +1467,7 @@ func mergeAlternativeBackends(ing *ingress.Ingress, upstreams map[string]*ingres
 					klog.V(2).Infof("matching backend %v found for alternative backend %v",
 						priUps.Name, altUps.Name)
 
-					merged = mergeAlternativeBackend(priUps, altUps)
+					merged = mergeAlternativeBackend(ing, priUps, altUps)
 				}
 			}
 
@@ -1623,7 +1680,7 @@ func checkOverlap(ing *networking.Ingress, ingresses []*ingress.Ingress, servers
 					return fmt.Errorf(`host "%s" and path "%s" is already defined in ingress %s/%s`, rule.Host, path.Path, existing.Namespace, existing.Name)
 				}
 
-				if annotationErr == errors.ErrMissingAnnotations && existingAnnotationErr == existingAnnotationErr {
+				if annotationErr == errors.ErrMissingAnnotations && existingAnnotationErr == errors.ErrMissingAnnotations {
 					return fmt.Errorf(`host "%s" and path "%s" is already defined in ingress %s/%s`, rule.Host, path.Path, existing.Namespace, existing.Name)
 				}
 			}
@@ -1646,6 +1703,10 @@ func ingressForHostPath(hostname, path string, servers []*ingress.Server) []*net
 
 		for _, location := range server.Locations {
 			if location.Path != path {
+				continue
+			}
+
+			if location.IsDefBackend {
 				continue
 			}
 

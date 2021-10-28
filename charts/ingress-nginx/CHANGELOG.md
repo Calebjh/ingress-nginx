@@ -2,6 +2,21 @@
 
 This file documents all notable changes to [ingress-nginx](https://github.com/kubernetes/ingress-nginx) Helm Chart. The release numbering uses [semantic versioning](http://semver.org).
 
+### 3.39.0
+- [7742] https://github.com/kubernetes/ingress-nginx/pull/7742 Release v0.49.3 with bugfixes
+
+### 3.37.0
+- [7666] https://github.com/kubernetes/ingress-nginx/pull/7666 Add option to disable snippet annotations
+- [7671] https://github.com/kubernetes/ingress-nginx/pull/7671 Downgrade NGINX image to v1.19.9
+
+### 3.34.0
+
+- [7256] https://github.com/kubernetes/ingress-nginx/pull/7256 Add namespace field in the namespace scoped resource templates
+
+### 3.33.0
+
+- [7164] https://github.com/kubernetes/ingress-nginx/pull/7164 Update nginx to v1.20.1
+
 ### 3.32.0
 
 - [7117] https://github.com/kubernetes/ingress-nginx/pull/7117 Add annotations for HPA

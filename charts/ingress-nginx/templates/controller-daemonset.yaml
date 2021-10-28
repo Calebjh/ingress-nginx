@@ -10,6 +10,7 @@ metadata:
     {{- toYaml . | nindent 4 }}
     {{- end }}
   name: {{ include "ingress-nginx.controller.fullname" . }}
+  namespace: {{ .Release.Namespace }}
   {{- if .Values.controller.annotations }}
   annotations: {{ toYaml .Values.controller.annotations | nindent 4 }}
   {{- end }}
@@ -40,6 +41,9 @@ spec:
     spec:
     {{- if .Values.controller.dnsConfig }}
       dnsConfig: {{ toYaml .Values.controller.dnsConfig | nindent 8 }}
+    {{- end }}
+    {{- if .Values.controller.hostname }}
+      hostname: {{ toYaml .Values.controller.hostname | nindent 8 }}
     {{- end }}
       dnsPolicy: {{ .Values.controller.dnsPolicy }}
     {{- if .Values.imagePullSecrets }}
