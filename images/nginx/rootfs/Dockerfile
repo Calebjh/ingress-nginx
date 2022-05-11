@@ -68,19 +68,21 @@ RUN yum -y install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-
      -s /sbin/nologin -G www-data -g www-data www-data \
   && bash -eu -c ' \
   writeDirs=( \
-    /var/log/nginx \
-    /var/lib/nginx/body \
-    /var/lib/nginx/fastcgi \
-    /var/lib/nginx/proxy \
-    /var/lib/nginx/scgi \
-    /var/lib/nginx/uwsgi \
-    /var/log/audit \
+  /var/log/nginx \
+  /var/lib/nginx/body \
+  /var/lib/nginx/fastcgi \
+  /var/lib/nginx/proxy \
+  /var/lib/nginx/scgi \
+  /var/lib/nginx/uwsgi \
+  /var/log/audit \
   ); \
   for dir in "${writeDirs[@]}"; do \
-    mkdir -p ${dir}; \
-    chown -R www-data.www-data ${dir}; \
+  mkdir -p ${dir}; \
+  chown -R www-data.www-data ${dir}; \
   done'
 
 EXPOSE 80 443
+
+ENTRYPOINT ["/usr/local/entrypoint.sh"]
 
 CMD ["nginx", "-g", "daemon off;"]

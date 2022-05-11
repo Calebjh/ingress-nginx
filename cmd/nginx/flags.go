@@ -22,12 +22,15 @@ import (
 	"os"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/pflag"
 	apiv1 "k8s.io/api/core/v1"
-	"k8s.io/ingress-nginx/internal/ingress/annotations/class"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/parser"
 	"k8s.io/ingress-nginx/internal/ingress/controller"
 	ngx_config "k8s.io/ingress-nginx/internal/ingress/controller/config"
+	"k8s.io/ingress-nginx/internal/ingress/controller/ingressclass"
+	"k8s.io/ingress-nginx/internal/ingress/metric/collectors"
 	"k8s.io/ingress-nginx/internal/ingress/status"
 	ing_net "k8s.io/ingress-nginx/internal/net"
 	"k8s.io/ingress-nginx/internal/nginx"
@@ -55,10 +58,21 @@ only when the flag --apiserver-host is specified.`)
 Takes the form "namespace/name". The controller configures NGINX to forward
 requests to the first port of this Service.`)
 
-		ingressClass = flags.String("ingress-class", "",
-			`Name of the ingress class this controller satisfies.
-The class of an Ingress object is set using the field IngressClassName in Kubernetes clusters version v1.18.0 or higher or the annotation "kubernetes.io/ingress.class" (deprecated).
-If this parameter is not set, or set to the default value of "nginx", it will handle ingresses with either an empty or "nginx" class name.`)
+		ingressClassAnnotation = flags.String("ingress-class", ingressclass.DefaultAnnotationValue,
+			`[IN DEPRECATION] Name of the ingress class this controller satisfies.
+The class of an Ingress object is set using the annotation "kubernetes.io/ingress.class" (deprecated).
+The parameter --controller-class has precedence over this.`)
+
+		ingressClassController = flags.String("controller-class", ingressclass.DefaultControllerName,
+			`Ingress Class Controller value this Ingress satisfies.
+The class of an Ingress object is set using the field IngressClassName in Kubernetes clusters version v1.19.0 or higher. The .spec.controller value of the IngressClass
+referenced in an Ingress Object should be the same value specified here to make this object be watched.`)
+
+		watchWithoutClass = flags.Bool("watch-ingress-without-class", false,
+			`Define if Ingress Controller should also watch for Ingresses without an IngressClass or the annotation specified`)
+
+		ingressClassByName = flags.Bool("ingress-class-by-name", false,
+			`Define if Ingress Controller should watch for Ingress Class by Name together with Controller Class`)
 
 		configMap = flags.String("configmap", "",
 			`Name of the ConfigMap containing custom global configurations for the controller.`)
@@ -88,6 +102,9 @@ either be a port name or number.`)
 			`Namespace the controller watches for updates to Kubernetes objects.
 This includes Ingresses, Services and all configuration resources. All
 namespaces are watched if this parameter is left empty.`)
+
+		watchNamespaceSelector = flags.String("watch-namespace-selector", "",
+			`Selector selects namespaces the controller watches for updates to Kubernetes objects.`)
 
 		profiling = flags.Bool("profiling", true,
 			`Enable profiling via web interface host:port/debug/pprof/`)
@@ -146,6 +163,9 @@ Requires the update-status parameter.`)
 			`Enables the collection of NGINX metrics`)
 		metricsPerHost = flags.Bool("metrics-per-host", true,
 			`Export metrics per-host`)
+		timeBuckets         = flags.Float64Slice("time-buckets", prometheus.DefBuckets, "Set of buckets which will be used for prometheus histogram metrics such as RequestTime, ResponseTime")
+		lengthBuckets       = flags.Float64Slice("length-buckets", prometheus.LinearBuckets(10, 10, 10), "Set of buckets which will be used for prometheus histogram metrics such as RequestLength, ResponseLength")
+		sizeBuckets         = flags.Float64Slice("size-buckets", prometheus.ExponentialBuckets(10, 10, 7), "Set of buckets which will be used for prometheus histogram metrics such as BytesSent")
 		monitorMaxBatchSize = flags.Int("monitor-max-batch-size", 10000, "Max batch size of NGINX metrics")
 
 		httpPort  = flags.Int("http-port", 80, `Port to use for servicing HTTP traffic.`)
@@ -154,6 +174,7 @@ Requires the update-status parameter.`)
 		sslProxyPort  = flags.Int("ssl-passthrough-proxy-port", 442, `Port to use internally for SSL Passthrough.`)
 		defServerPort = flags.Int("default-server-port", 8181, `Port to use for exposing the default server (catch-all).`)
 		healthzPort   = flags.Int("healthz-port", 10254, "Port to use for the healthz endpoint.")
+		healthzHost   = flags.String("healthz-host", "", "Address to bind the healthz endpoint.")
 
 		disableCatchAll = flags.Bool("disable-catch-all", false,
 			`Disable support for catch-all Ingresses`)
@@ -165,15 +186,25 @@ Takes the form "<host>:port". If not provided, no admission controller is starte
 			`The path of the validating webhook certificate PEM.`)
 		validationWebhookKey = flags.String("validating-webhook-key", "",
 			`The path of the validating webhook key PEM.`)
+		disableFullValidationTest = flags.Bool("disable-full-test", false,
+			`Disable full test of all merged ingresses at the admission stage and tests the template of the ingress being created or updated  (full test of all ingresses is enabled by default)`)
 
 		statusPort = flags.Int("status-port", 10246, `Port to use for the lua HTTP endpoint configuration.`)
 		streamPort = flags.Int("stream-port", 10247, "Port to use for the lua TCP/UDP endpoint configuration.")
+
+		internalLoggerAddress = flags.String("internal-logger-address", "127.0.0.1:11514", "Address to be used when binding internal syslogger")
 
 		profilerPort = flags.Int("profiler-port", 10245, "Port to use for expose the ingress controller Go profiler when it is enabled.")
 
 		statusUpdateInterval = flags.Int("status-update-interval", status.UpdateInterval, "Time interval in seconds in which the status should check if an update is required. Default is 60 seconds")
 
 		shutdownGracePeriod = flags.Int("shutdown-grace-period", 0, "Seconds to wait after receiving the shutdown signal, before stopping the nginx process.")
+
+		postShutdownGracePeriod = flags.Int("post-shutdown-grace-period", 10, "Seconds to wait after the nginx process has stopped before controller exits.")
+
+		deepInspector = flags.Bool("deep-inspect", true, "Enables ingress object security deep inspector")
+
+		dynamicConfigurationRetries = flags.Int("dynamic-configuration-retries", 15, "Number of times to retry failed dynamic configuration before failing to sync an ingress.")
 	)
 
 	flags.StringVar(&nginx.MaxmindMirror, "maxmind-mirror", "", `Maxmind mirror url (example: http://geoip.local/databases`)
@@ -205,18 +236,6 @@ https://blog.maxmind.com/2019/12/18/significant-changes-to-accessing-and-using-g
 		status.UpdateInterval = 5
 	} else {
 		status.UpdateInterval = *statusUpdateInterval
-	}
-
-	if *ingressClass != "" {
-		klog.InfoS("Watching for Ingress", "class", *ingressClass)
-
-		if *ingressClass != class.DefaultClass {
-			klog.Warningf("Only Ingresses with class %q will be processed by this Ingress controller", *ingressClass)
-		} else {
-			klog.Warning("Ingresses with an empty class will also be processed by this Ingress controller")
-		}
-
-		class.IngressClass = *ingressClass
 	}
 
 	parser.AnnotationsPrefix = *annotationsPrefix
@@ -264,32 +283,58 @@ https://blog.maxmind.com/2019/12/18/significant-changes-to-accessing-and-using-g
 		nginx.HealthCheckTimeout = time.Duration(*defHealthCheckTimeout) * time.Second
 	}
 
+	if len(*watchNamespace) != 0 && len(*watchNamespaceSelector) != 0 {
+		return false, nil, fmt.Errorf("flags --watch-namespace and --watch-namespace-selector are mutually exclusive")
+	}
+
+	var namespaceSelector labels.Selector
+	if len(*watchNamespaceSelector) != 0 {
+		var err error
+		namespaceSelector, err = labels.Parse(*watchNamespaceSelector)
+		if err != nil {
+			return false, nil, fmt.Errorf("failed to parse --watch-namespace-selector=%s, error: %v", *watchNamespaceSelector, err)
+		}
+	}
+
+	var histogramBuckets = &collectors.HistogramBuckets{
+		TimeBuckets:   *timeBuckets,
+		LengthBuckets: *lengthBuckets,
+		SizeBuckets:   *sizeBuckets,
+	}
+
 	ngx_config.EnableSSLChainCompletion = *enableSSLChainCompletion
 
 	config := &controller.Configuration{
-		APIServerHost:              *apiserverHost,
-		KubeConfigFile:             *kubeConfigFile,
-		UpdateStatus:               *updateStatus,
-		ElectionID:                 *electionID,
-		EnableProfiling:            *profiling,
-		EnableMetrics:              *enableMetrics,
-		MetricsPerHost:             *metricsPerHost,
-		MonitorMaxBatchSize:        *monitorMaxBatchSize,
-		DisableServiceExternalName: *disableServiceExternalName,
-		EnableSSLPassthrough:       *enableSSLPassthrough,
-		ResyncPeriod:               *resyncPeriod,
-		DefaultService:             *defaultSvc,
-		Namespace:                  *watchNamespace,
-		ConfigMapName:              *configMap,
-		TCPConfigMapName:           *tcpConfigMapName,
-		UDPConfigMapName:           *udpConfigMapName,
-		DefaultSSLCertificate:      *defSSLCertificate,
-		PublishService:             *publishSvc,
-		PublishStatusAddress:       *publishStatusAddress,
-		UpdateStatusOnShutdown:     *updateStatusOnShutdown,
-		ShutdownGracePeriod:        *shutdownGracePeriod,
-		UseNodeInternalIP:          *useNodeInternalIP,
-		SyncRateLimit:              *syncRateLimit,
+		APIServerHost:               *apiserverHost,
+		KubeConfigFile:              *kubeConfigFile,
+		UpdateStatus:                *updateStatus,
+		ElectionID:                  *electionID,
+		EnableProfiling:             *profiling,
+		EnableMetrics:               *enableMetrics,
+		MetricsPerHost:              *metricsPerHost,
+		MetricsBuckets:              histogramBuckets,
+		MonitorMaxBatchSize:         *monitorMaxBatchSize,
+		DisableServiceExternalName:  *disableServiceExternalName,
+		EnableSSLPassthrough:        *enableSSLPassthrough,
+		ResyncPeriod:                *resyncPeriod,
+		DefaultService:              *defaultSvc,
+		Namespace:                   *watchNamespace,
+		WatchNamespaceSelector:      namespaceSelector,
+		ConfigMapName:               *configMap,
+		TCPConfigMapName:            *tcpConfigMapName,
+		UDPConfigMapName:            *udpConfigMapName,
+		DisableFullValidationTest:   *disableFullValidationTest,
+		DefaultSSLCertificate:       *defSSLCertificate,
+		DeepInspector:               *deepInspector,
+		PublishService:              *publishSvc,
+		PublishStatusAddress:        *publishStatusAddress,
+		UpdateStatusOnShutdown:      *updateStatusOnShutdown,
+		ShutdownGracePeriod:         *shutdownGracePeriod,
+		PostShutdownGracePeriod:     *postShutdownGracePeriod,
+		UseNodeInternalIP:           *useNodeInternalIP,
+		SyncRateLimit:               *syncRateLimit,
+		HealthCheckHost:             *healthzHost,
+		DynamicConfigurationRetries: *dynamicConfigurationRetries,
 		ListenPorts: &ngx_config.ListenPorts{
 			Default:  *defServerPort,
 			Health:   *healthzPort,
@@ -297,10 +342,17 @@ https://blog.maxmind.com/2019/12/18/significant-changes-to-accessing-and-using-g
 			HTTPS:    *httpsPort,
 			SSLProxy: *sslProxyPort,
 		},
+		IngressClassConfiguration: &ingressclass.IngressClassConfiguration{
+			Controller:         *ingressClassController,
+			AnnotationValue:    *ingressClassAnnotation,
+			WatchWithoutClass:  *watchWithoutClass,
+			IngressClassByName: *ingressClassByName,
+		},
 		DisableCatchAll:           *disableCatchAll,
 		ValidationWebhook:         *validationWebhook,
 		ValidationWebhookCertPath: *validationWebhookCert,
 		ValidationWebhookKeyPath:  *validationWebhookKey,
+		InternalLoggerAddress:     *internalLoggerAddress,
 	}
 
 	if *apiserverHost != "" {

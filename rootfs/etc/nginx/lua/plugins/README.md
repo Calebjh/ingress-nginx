@@ -9,7 +9,7 @@ Every ingress-nginx Lua plugin is expected to have `main.lua` file and all of it
 `main.lua` is the entry point of the plugin. The plugin manager uses convention over configuration
 strategy and automatically runs functions defined in `main.lua` in the corresponding Nginx phase based on their name.
 
-Nginx has different [request processing phases](http://nginx.org/en/docs/dev/development_guide.html#http_phases).
+Nginx has different [request processing phases](https://nginx.org/en/docs/dev/development_guide.html#http_phases).
 By defining functions with the following names, you can run your custom Lua code in the corresponding Nginx phase:
 
  - `init_worker`: useful for initializing some data per Nginx worker process
@@ -33,4 +33,4 @@ Mounting is the quickest option.
 
 ### Enabling plugins
 
-Once your plugin is ready you need to use [`plugins` configuration setting](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/configmap/#plugins) to activate it. Let's say you want to active `hello_world` and `open_idc` plugins, then you set `plugins` setting to `"hello_world, open_idc"`. _Note_ that the plugins will be executed in the given order.
+Once your plugin is ready you need to use [`plugins` configuration setting](https://kubernetes.github.io/ingress-nginx/user-guide/nginx-configuration/configmap/#plugins) to activate it. Let's say you want to activate `hello_world` and `open_idc` plugins, then you set `plugins` setting to `"hello_world, open_idc"`. _Note_ that the plugins will be executed in the given order.
