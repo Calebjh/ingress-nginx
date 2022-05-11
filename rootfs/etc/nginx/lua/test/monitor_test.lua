@@ -82,6 +82,7 @@ describe("Monitor", function()
         namespace = "default",
         ingress_name = "example",
         service_name = "http-svc",
+        proxy_alternative_upstream_name = "default-http-svc-canary-80",
         location_path = "/",
 
         request_method = "GET",
@@ -114,6 +115,7 @@ describe("Monitor", function()
           namespace = "default",
           ingress = "example",
           service = "http-svc",
+          canary = "default-http-svc-canary-80",
           path = "/",
 
           method = "GET",
@@ -131,6 +133,7 @@ describe("Monitor", function()
           namespace = "default",
           ingress = "example",
           service = "http-svc",
+          canary = "default-http-svc-canary-80",
           path = "/",
 
           method = "POST",
@@ -145,7 +148,7 @@ describe("Monitor", function()
         },
       })
 
-      assert.stub(tcp_mock.connect).was_called_with(tcp_mock, "unix:/tmp/prometheus-nginx.socket")
+      assert.stub(tcp_mock.connect).was_called_with(tcp_mock, "unix:/tmp/nginx/prometheus-nginx.socket")
       assert.stub(tcp_mock.send).was_called_with(tcp_mock, expected_payload)
       assert.stub(tcp_mock.close).was_called_with(tcp_mock)
     end)

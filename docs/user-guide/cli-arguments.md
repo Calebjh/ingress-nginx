@@ -2,7 +2,7 @@
 
 The following command line arguments are accepted by the Ingress controller executable.
 
-They are set in the container spec of the `nginx-ingress-controller` Deployment manifest
+They are set in the container spec of the `ingress-nginx-controller` Deployment manifest
 
 | Argument | Description |
 |----------|-------------|
@@ -12,10 +12,12 @@ They are set in the container spec of the `nginx-ingress-controller` Deployment 
 | `--apiserver-host`                 | Address of the Kubernetes API server. Takes the form "protocol://address:port". If not specified, it is assumed the program runs inside a Kubernetes cluster and local discovery is attempted. |
 | `--certificate-authority`          | Path to a cert file for the certificate authority. This certificate is used only when the flag --apiserver-host is specified. |
 | `--configmap`                      | Name of the ConfigMap containing custom global configurations for the controller. |
+| `--deep-inspect`                   | Enables ingress object security deep inspector. (default true) |
 | `--default-backend-service`        | Service used to serve HTTP requests not matching any known server name (catch-all). Takes the form "namespace/name". The controller configures NGINX to forward requests to the first port of this Service. |
 | `--default-server-port`            | Port to use for exposing the default server (catch-all). (default 8181) |
 | `--default-ssl-certificate`        | Secret containing a SSL certificate to be used by the default HTTPS server (catch-all). Takes the form "namespace/name". |
 | `--disable-catch-all`              | Disable support for catch-all Ingresses |
+| `--disable-full-test` | Disable full test of all merged ingresses at the admission stage and tests the template of the ingress being created or updated  (full test of all ingresses is enabled by default) |
 | `--election-id`                    | Election id to use for Ingress status updates. (default "ingress-controller-leader") |
 | `--enable-metrics`                 | Enables the collection of NGINX metrics (default true) |
 | `--enable-ssl-chain-completion`    | Autocomplete SSL certificate chains with missing intermediate CA certificates. Certificates uploaded to Kubernetes must have the "Authority Information Access" X.509 v3 extension for this to succeed. |
@@ -23,9 +25,11 @@ They are set in the container spec of the `nginx-ingress-controller` Deployment 
 | `--health-check-path`              | URL path of the health check endpoint. Configured inside the NGINX status server. All requests received on the port defined by the healthz-port parameter are forwarded internally to this path. (default "/healthz") |
 | `--health-check-timeout`           | Time limit, in seconds, for a probe to health-check-path to succeed. (default 10) |
 | `--healthz-port`                   | Port to use for the healthz endpoint. (default 10254) |
+| `--healthz-host`                   | Address to bind the healthz endpoint. |
 | `--http-port`                      | Port to use for servicing HTTP traffic. (default 80) |
 | `--https-port`                     | Port to use for servicing HTTPS traffic. (default 443) |
 | `--ingress-class`                  | Name of the ingress class this controller satisfies. The class of an Ingress object is set using the field IngressClassName in Kubernetes clusters version v1.18.0 or higher or the annotation "kubernetes.io/ingress.class" (deprecated). If this parameter is not set, or set to the default value of "nginx", it will handle ingresses with either an empty or "nginx" class name. |
+| `--ingress-class-by-name`          | Define if Ingress Controller should watch for Ingress Class by Name together with Controller Class. (default false) |
 | `--kubeconfig`                     | Path to a kubeconfig file containing authorization and API server information. |
 | `--log_backtrace_at`               | when logging hits line file:N, emit a stack trace (default :0) |
 | `--log_dir`                        | If non-empty, write log files in this directory |
@@ -37,6 +41,7 @@ They are set in the container spec of the `nginx-ingress-controller` Deployment 
 | `--maxmind-retries-count`          | Number of attempts to download the GeoIP DB. (default 1) |
 | `--maxmind-license-key`            | Maxmind license key to download GeoLite2 Databases. https://blog.maxmind.com/2019/12/18/significant-changes-to-accessing-and-using-geolite2-databases |
 | `--metrics-per-host`               | Export metrics per-host (default true) |
+| `--post-shutdown-grace-period`     | Additional delay in seconds before controller container exits. (default 10) |
 | `--profiler-port`                  | Port to use for expose the ingress controller Go profiler when it is enabled. (default 10245) |
 | `--profiling`                      | Enable profiling via web interface host:port/debug/pprof/ (default true) |
 | `--publish-service`                | Service fronting the Ingress controller. Takes the form "namespace/name". When used together with update-status, the controller mirrors the address of this service's endpoints to the load-balancer status of all Ingress objects it satisfies. |
@@ -63,3 +68,4 @@ They are set in the container spec of the `nginx-ingress-controller` Deployment 
 | `--version`                        | Show release information about the NGINX Ingress controller and exit. |
 | `--vmodule`                        | comma-separated list of pattern=N settings for file-filtered logging |
 | `--watch-namespace`                | Namespace the controller watches for updates to Kubernetes objects. This includes Ingresses, Services and all configuration resources. All namespaces are watched if this parameter is left empty. |
+| `--watch-namespace-selector`       | The controller will watch namespaces whose labels match the given selector. This flag only takes effective when `--watch-namespace` is empty. |

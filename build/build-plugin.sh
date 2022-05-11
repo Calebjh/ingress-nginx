@@ -52,8 +52,10 @@ function build_for_arch(){
   arch=$2
   extension=$3
 
+  echo "> building targets for ${os}-${arch}"
+
   env GOOS="${os}" GOARCH="${arch}" go build \
-    "${GOBUILD_FLAGS}" \
+    ${GOBUILD_FLAGS} \
     -trimpath -ldflags="-buildid= -w -s \
       -X ${PKG}/version.RELEASE=${TAG} \
       -X ${PKG}/version.COMMIT=${COMMIT_SHA} \
@@ -74,6 +76,9 @@ cp cmd/plugin/ingress-nginx.yaml.tmpl "${release}/ingress-nginx.yaml"
 
 sed -i "s/%%%tag%%%/${TAG}/g" ${release}/ingress-nginx.yaml
 
+echo "Generated targets in ${release} directory."
+
 build_for_arch darwin amd64 ''
+build_for_arch darwin arm64 ''
 build_for_arch linux amd64 ''
 build_for_arch windows amd64 '.exe'
