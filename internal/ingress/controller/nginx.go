@@ -49,7 +49,6 @@ import (
 	adm_controller "k8s.io/ingress-nginx/internal/admission/controller"
 	"k8s.io/ingress-nginx/internal/file"
 	"k8s.io/ingress-nginx/internal/ingress"
-	"k8s.io/ingress-nginx/internal/ingress/annotations/class"
 	ngx_config "k8s.io/ingress-nginx/internal/ingress/controller/config"
 	"k8s.io/ingress-nginx/internal/ingress/controller/process"
 	"k8s.io/ingress-nginx/internal/ingress/controller/store"
@@ -123,6 +122,7 @@ func NewNGINXController(config *Configuration, mc metric.Collector) *NGINXContro
 
 	n.store = store.New(
 		config.Namespace,
+		config.WatchNamespaceSelector,
 		config.ConfigMapName,
 		config.TCPConfigMapName,
 		config.UDPConfigMapName,
@@ -130,7 +130,9 @@ func NewNGINXController(config *Configuration, mc metric.Collector) *NGINXContro
 		config.ResyncPeriod,
 		config.Client,
 		n.updateCh,
-		config.DisableCatchAll)
+		config.DisableCatchAll,
+		config.DeepInspector,
+		config.IngressClassConfiguration)
 
 	n.syncQueue = task.NewTaskQueue(n.syncIngress)
 
@@ -241,7 +243,8 @@ type NGINXController struct {
 
 	store store.Storer
 
-	metricCollector metric.Collector
+	metricCollector    metric.Collector
+	admissionCollector metric.Collector
 
 	validationWebhookServer *http.Server
 
@@ -256,10 +259,10 @@ func (n *NGINXController) Start() {
 
 	// we need to use the defined ingress class to allow multiple leaders
 	// in order to update information about ingress status
-	electionID := fmt.Sprintf("%v-%v", n.cfg.ElectionID, class.DefaultClass)
-	if class.IngressClass != "" {
-		electionID = fmt.Sprintf("%v-%v", n.cfg.ElectionID, class.IngressClass)
-	}
+	// TODO: For now, as the the IngressClass logics has changed, is up to the
+	// cluster admin to create different Leader Election IDs.
+	// Should revisit this in a future
+	electionID := n.cfg.ElectionID
 
 	setupLeaderElection(&leaderElectionConfig{
 		Client:     n.cfg.Client,
@@ -273,6 +276,7 @@ func (n *NGINXController) Start() {
 			// manually update SSL expiration metrics
 			// (to not wait for a reload)
 			n.metricCollector.SetSSLExpireTime(n.runningConfig.Servers)
+			n.metricCollector.SetSSLInfo(n.runningConfig.Servers)
 		},
 		OnStoppedLeading: func() {
 			n.metricCollector.OnStoppedLeading(electionID)
@@ -511,12 +515,7 @@ func (n NGINXController) generateTemplate(cfg ngx_config.Configuration, ingressC
 	if cfg.MaxWorkerOpenFiles == 0 {
 		// the limit of open files is per worker process
 		// and we leave some room to avoid consuming all the FDs available
-		wp, err := strconv.Atoi(cfg.WorkerProcesses)
-		klog.V(3).InfoS("Worker processes", "count", wp)
-		if err != nil {
-			wp = 1
-		}
-		maxOpenFiles := (rlimitMaxNumFiles() / wp) - 1024
+		maxOpenFiles := rlimitMaxNumFiles() - 1024
 		klog.V(3).InfoS("Maximum number of open file descriptors", "value", maxOpenFiles)
 		if maxOpenFiles < 1024 {
 			// this means the value of RLIMIT_NOFILE is too low.
@@ -577,6 +576,15 @@ func (n NGINXController) generateTemplate(cfg ngx_config.Configuration, ingressC
 
 	cfg.DefaultSSLCertificate = n.getDefaultSSLCertificate()
 
+	if n.cfg.IsChroot {
+		if cfg.AccessLogPath == "/var/log/nginx/access.log" {
+			cfg.AccessLogPath = fmt.Sprintf("syslog:server=%s", n.cfg.InternalLoggerAddress)
+		}
+		if cfg.ErrorLogPath == "/var/log/nginx/error.log" {
+			cfg.ErrorLogPath = fmt.Sprintf("syslog:server=%s", n.cfg.InternalLoggerAddress)
+		}
+	}
+
 	tc := ngx_config.TemplateConfig{
 		ProxySetHeaders:          setHeaders,
 		AddHeaders:               addHeaders,
@@ -602,6 +610,7 @@ func (n NGINXController) generateTemplate(cfg ngx_config.Configuration, ingressC
 		StatusPath:               nginx.StatusPath,
 		StatusPort:               nginx.StatusPort,
 		StreamPort:               nginx.StreamPort,
+		StreamSnippets:           append(ingressCfg.StreamSnippets, cfg.StreamSnippet),
 	}
 
 	tc.Cfg.Checksum = ingressCfg.ConfigurationChecksum
@@ -615,7 +624,8 @@ func (n NGINXController) testTemplate(cfg []byte) error {
 	if len(cfg) == 0 {
 		return fmt.Errorf("invalid NGINX configuration (empty)")
 	}
-	tmpfile, err := os.CreateTemp("", tempNginxPattern)
+	tmpDir := os.TempDir() + "/nginx"
+	tmpfile, err := os.CreateTemp(tmpDir, tempNginxPattern)
 	if err != nil {
 		return err
 	}
