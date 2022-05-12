@@ -251,4 +251,4 @@ release: ensure-buildx clean
 		--build-arg VERSION="$(TAG)" \
 		--build-arg COMMIT_SHA="$(COMMIT_SHA)" \
 		--build-arg BUILD_ID="$(BUILD_ID)" \
-		-t $(REGISTRY)/controller-chroot:$(TAG) rootfs -f rootfs/Dockerfile.chroot
+		-t $(REGISTRY)/$(IMAGE_NAME):$(TAG)-chroot rootfs -f rootfs/Dockerfile.chroot
