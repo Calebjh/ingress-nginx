@@ -19,8 +19,8 @@ FROM ${BASE_IMAGE} as chroot
 # This intermediary image will be used only to copy all the required files to the chroot
 # TODO: Simplify in a future to a single Dockerfile
 COPY chroot.sh /chroot.sh
-RUN apk update \
-  && apk upgrade \
+RUN yum -y update \
+  && yum -y upgrade \
   && /chroot.sh
 
 FROM alpine:3.14.6
@@ -58,7 +58,7 @@ RUN apk update \
      util-linux \
   && ln -s /usr/local/nginx/sbin/nginx /sbin/nginx \
   && adduser -S -D -H -u 101 -h /usr/local/nginx \
-    -s /sbin/nologin -G www-data -g www-data www-data 
+    -s /sbin/nologin -G www-data -g www-data www-data
 
 COPY --from=chroot /chroot /chroot
 
@@ -109,4 +109,3 @@ EXPOSE 80 443
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 
 CMD ["/nginx-ingress-controller"]
- 
