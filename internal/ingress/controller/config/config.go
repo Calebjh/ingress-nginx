@@ -24,9 +24,9 @@ import (
 
 	apiv1 "k8s.io/api/core/v1"
 
-	"k8s.io/ingress-nginx/internal/ingress"
 	"k8s.io/ingress-nginx/internal/ingress/defaults"
-	"k8s.io/ingress-nginx/internal/runtime"
+	"k8s.io/ingress-nginx/pkg/apis/ingress"
+	"k8s.io/ingress-nginx/pkg/util/runtime"
 )
 
 var (
@@ -263,6 +263,10 @@ type Configuration struct {
 	// Default: 4 8k
 	LargeClientHeaderBuffers string `json:"large-client-header-buffers"`
 
+	// Disable all escaping
+	// http://nginx.org/en/docs/http/ngx_http_log_module.html#log_format
+	LogFormatEscapeNone bool `json:"log-format-escape-none,omitempty"`
+
 	// Enable json escaping
 	// http://nginx.org/en/docs/http/ngx_http_log_module.html#log_format
 	LogFormatEscapeJSON bool `json:"log-format-escape-json,omitempty"`
@@ -433,6 +437,11 @@ type Configuration struct {
 	// http://nginx.org/en/docs/http/ngx_http_v2_module.html
 	// Default: true
 	UseHTTP2 bool `json:"use-http2,omitempty"`
+
+	// Disables gzipping of responses for requests with "User-Agent" header fields matching any of
+	// the specified regular expressions.
+	// http://nginx.org/en/docs/http/ngx_http_gzip_module.html#gzip_disable
+	GzipDisable string `json:"gzip-disable,omitempty"`
 
 	// gzip Compression Level that will be used
 	GzipLevel int `json:"gzip-level,omitempty"`
@@ -768,6 +777,11 @@ type Configuration struct {
 	// GlobalRateLimitStatucCode determines the HTTP status code to return
 	// when limit is exceeding during global rate limiting.
 	GlobalRateLimitStatucCode int `json:"global-rate-limit-status-code"`
+
+	// DebugConnections Enables debugging log for selected client connections
+	// http://nginx.org/en/docs/ngx_core_module.html#debug_connection
+	// Default: ""
+	DebugConnections []string `json:"debug-connections"`
 }
 
 // NewDefault returns the default nginx configuration
@@ -782,10 +796,9 @@ func NewDefault() Configuration {
 	defNginxStatusIpv4Whitelist = append(defNginxStatusIpv4Whitelist, "127.0.0.1")
 	defNginxStatusIpv6Whitelist = append(defNginxStatusIpv6Whitelist, "::1")
 	defProxyDeadlineDuration := time.Duration(5) * time.Second
-	defGlobalExternalAuth := GlobalExternalAuth{"", "", "", "", "", append(defResponseHeaders, ""), "", "", "", []string{}, map[string]string{}}
+	defGlobalExternalAuth := GlobalExternalAuth{"", "", "", "", "", append(defResponseHeaders, ""), "", "", "", []string{}, map[string]string{}, false}
 
 	cfg := Configuration{
-
 		AllowSnippetAnnotations:          true,
 		AllowBackendServerHeader:         false,
 		AnnotationValueWordBlocklist:     "",
@@ -826,7 +839,7 @@ func NewDefault() Configuration {
 		GzipMinLength:                    256,
 		GzipTypes:                        gzipTypes,
 		KeepAlive:                        75,
-		KeepAliveRequests:                100,
+		KeepAliveRequests:                1000,
 		LargeClientHeaderBuffers:         "4 8k",
 		LogFormatEscapeJSON:              false,
 		LogFormatStream:                  logFormatStream,
@@ -886,6 +899,7 @@ func NewDefault() Configuration {
 			PreserveTrailingSlash:    false,
 			SSLRedirect:              true,
 			CustomHTTPErrors:         []int{},
+			DenylistSourceRange:      []string{},
 			WhitelistSourceRange:     []string{},
 			SkipAccessLogURLs:        []string{},
 			LimitRate:                0,
@@ -932,6 +946,7 @@ func NewDefault() Configuration {
 		GlobalRateLimitMemcachedMaxIdleTimeout: 10000,
 		GlobalRateLimitMemcachedPoolSize:       50,
 		GlobalRateLimitStatucCode:              429,
+		DebugConnections:                       []string{},
 	}
 
 	if klog.V(5).Enabled() {
@@ -995,4 +1010,5 @@ type GlobalExternalAuth struct {
 	AuthCacheKey           string            `json:"authCacheKey"`
 	AuthCacheDuration      []string          `json:"authCacheDuration"`
 	ProxySetHeaders        map[string]string `json:"proxySetHeaders,omitempty"`
+	AlwaysSetCookie        bool              `json:"alwaysSetCookie,omitempty"`
 }

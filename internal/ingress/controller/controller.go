@@ -32,7 +32,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
-	"k8s.io/ingress-nginx/internal/ingress"
 	"k8s.io/ingress-nginx/internal/ingress/annotations"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/log"
 	"k8s.io/ingress-nginx/internal/ingress/annotations/parser"
@@ -45,13 +44,18 @@ import (
 	"k8s.io/ingress-nginx/internal/ingress/metric/collectors"
 	"k8s.io/ingress-nginx/internal/k8s"
 	"k8s.io/ingress-nginx/internal/nginx"
+	"k8s.io/ingress-nginx/pkg/apis/ingress"
+	utilingress "k8s.io/ingress-nginx/pkg/util/ingress"
 	"k8s.io/klog/v2"
 )
 
 const (
-	defUpstreamName = "upstream-default-backend"
-	defServerName   = "_"
-	rootLocation    = "/"
+	defUpstreamName             = "upstream-default-backend"
+	defServerName               = "_"
+	rootLocation                = "/"
+	emptyZone                   = ""
+	orphanMetricLabelNoService  = "no-service"
+	orphanMetricLabelNoEndpoint = "no-endpoint"
 )
 
 // Configuration contains all the settings required by an Ingress controller
@@ -97,9 +101,10 @@ type Configuration struct {
 
 	EnableProfiling bool
 
-	EnableMetrics  bool
-	MetricsPerHost bool
-	MetricsBuckets *collectors.HistogramBuckets
+	EnableMetrics       bool
+	MetricsPerHost      bool
+	MetricsBuckets      *collectors.HistogramBuckets
+	ReportStatusClasses bool
 
 	FakeCertificate *ingress.SSLCert
 
@@ -127,6 +132,23 @@ type Configuration struct {
 	DeepInspector         bool
 
 	DynamicConfigurationRetries int
+
+	DisableSyncEvents bool
+
+	EnableTopologyAwareRouting bool
+}
+
+func getIngressPodZone(svc *apiv1.Service) string {
+	svcKey := k8s.MetaNamespaceKey(svc)
+	if svcZoneAnnotation, ok := svc.ObjectMeta.GetAnnotations()[apiv1.AnnotationTopologyAwareHints]; ok {
+		if strings.ToLower(svcZoneAnnotation) == "auto" {
+			if foundZone, ok := k8s.IngressNodeDetails.GetLabels()[apiv1.LabelTopologyZone]; ok {
+				klog.V(3).Infof("Svc has topology aware annotation enabled, try to use zone %q where controller pod is running for Service %q ", foundZone, svcKey)
+				return foundZone
+			}
+		}
+	}
+	return emptyZone
 }
 
 // GetPublishService returns the Service used to set the load-balancer status of Ingresses.
@@ -162,7 +184,7 @@ func (n *NGINXController) syncIngress(interface{}) error {
 
 	n.metricCollector.SetHosts(hosts)
 
-	if !n.IsDynamicConfigurationEnough(pcfg) {
+	if !utilingress.IsDynamicConfigurationEnough(pcfg, n.runningConfig) {
 		klog.InfoS("Configuration changes detected, backend reload required")
 
 		hash, _ := hashstructure.Hash(pcfg, &hashstructure.HashOptions{
@@ -222,9 +244,9 @@ func (n *NGINXController) syncIngress(interface{}) error {
 		return err
 	}
 
-	ri := getRemovedIngresses(n.runningConfig, pcfg)
-	re := getRemovedHosts(n.runningConfig, pcfg)
-	rc := getRemovedCertificateSerialNumbers(n.runningConfig, pcfg)
+	ri := utilingress.GetRemovedIngresses(n.runningConfig, pcfg)
+	re := utilingress.GetRemovedHosts(n.runningConfig, pcfg)
+	rc := utilingress.GetRemovedCertificateSerialNumbers(n.runningConfig, pcfg)
 	n.metricCollector.RemoveMetrics(ri, re, rc)
 
 	n.runningConfig = pcfg
@@ -263,7 +285,7 @@ func (n *NGINXController) CheckIngress(ing *networking.Ingress) error {
 	}
 
 	if n.cfg.DisableCatchAll && ing.Spec.DefaultBackend != nil {
-		return fmt.Errorf("This deployment is trying to create a catch-all ingress while DisableCatchAll flag is set to true. Remove '.spec.backend' or set DisableCatchAll flag to false.")
+		return fmt.Errorf("This deployment is trying to create a catch-all ingress while DisableCatchAll flag is set to true. Remove '.spec.defaultBackend' or set DisableCatchAll flag to false.")
 	}
 	startRender := time.Now().UnixNano() / 1000000
 	cfg := n.store.GetBackendConfiguration()
@@ -425,6 +447,13 @@ func (n *NGINXController) getStreamServices(configmapName string, proto apiv1.Pr
 		var endps []ingress.Endpoint
 		/* #nosec */
 		targetPort, err := strconv.Atoi(svcPort) // #nosec
+		var zone string
+		if n.cfg.EnableTopologyAwareRouting {
+			zone = getIngressPodZone(svc)
+		} else {
+			zone = emptyZone
+		}
+
 		if err != nil {
 			// not a port number, fall back to using port name
 			klog.V(3).Infof("Searching Endpoints with %v port name %q for Service %q", proto, svcPort, nsName)
@@ -432,7 +461,7 @@ func (n *NGINXController) getStreamServices(configmapName string, proto apiv1.Pr
 				sp := svc.Spec.Ports[i]
 				if sp.Name == svcPort {
 					if sp.Protocol == proto {
-						endps = getEndpoints(svc, &sp, proto, n.store.GetServiceEndpoints)
+						endps = getEndpointsFromSlices(svc, &sp, proto, zone, n.store.GetServiceEndpointsSlices)
 						break
 					}
 				}
@@ -443,7 +472,7 @@ func (n *NGINXController) getStreamServices(configmapName string, proto apiv1.Pr
 				sp := svc.Spec.Ports[i]
 				if sp.Port == int32(targetPort) {
 					if sp.Protocol == proto {
-						endps = getEndpoints(svc, &sp, proto, n.store.GetServiceEndpoints)
+						endps = getEndpointsFromSlices(svc, &sp, proto, zone, n.store.GetServiceEndpointsSlices)
 						break
 					}
 				}
@@ -494,8 +523,13 @@ func (n *NGINXController) getDefaultUpstream() *ingress.Backend {
 		upstream.Endpoints = append(upstream.Endpoints, n.DefaultEndpoint())
 		return upstream
 	}
-
-	endps := getEndpoints(svc, &svc.Spec.Ports[0], apiv1.ProtocolTCP, n.store.GetServiceEndpoints)
+	var zone string
+	if n.cfg.EnableTopologyAwareRouting {
+		zone = getIngressPodZone(svc)
+	} else {
+		zone = emptyZone
+	}
+	endps := getEndpointsFromSlices(svc, &svc.Spec.Ports[0], apiv1.ProtocolTCP, zone, n.store.GetServiceEndpointsSlices)
 	if len(endps) == 0 {
 		klog.Warningf("Service %q does not have any active Endpoint", svcKey)
 		endps = []ingress.Endpoint{n.DefaultEndpoint()}
@@ -765,6 +799,7 @@ func (n *NGINXController) getBackendServers(ingresses []*ingress.Ingress) ([]*in
 					ups.SessionAffinity.CookieSessionAffinity.MaxAge = anns.SessionAffinity.Cookie.MaxAge
 					ups.SessionAffinity.CookieSessionAffinity.Secure = anns.SessionAffinity.Cookie.Secure
 					ups.SessionAffinity.CookieSessionAffinity.Path = cookiePath
+					ups.SessionAffinity.CookieSessionAffinity.Domain = anns.SessionAffinity.Cookie.Domain
 					ups.SessionAffinity.CookieSessionAffinity.SameSite = anns.SessionAffinity.Cookie.SameSite
 					ups.SessionAffinity.CookieSessionAffinity.ConditionalSameSiteNone = anns.SessionAffinity.Cookie.ConditionalSameSiteNone
 					ups.SessionAffinity.CookieSessionAffinity.ChangeOnFailure = anns.SessionAffinity.Cookie.ChangeOnFailure
@@ -822,7 +857,13 @@ func (n *NGINXController) getBackendServers(ingresses []*ingress.Ingress) ([]*in
 				}
 
 				sp := location.DefaultBackend.Spec.Ports[0]
-				endps := getEndpoints(location.DefaultBackend, &sp, apiv1.ProtocolTCP, n.store.GetServiceEndpoints)
+				var zone string
+				if n.cfg.EnableTopologyAwareRouting {
+					zone = getIngressPodZone(location.DefaultBackend)
+				} else {
+					zone = emptyZone
+				}
+				endps := getEndpointsFromSlices(location.DefaultBackend, &sp, apiv1.ProtocolTCP, zone, n.store.GetServiceEndpointsSlices)
 				// custom backend is valid only if contains at least one endpoint
 				if len(endps) > 0 {
 					name := fmt.Sprintf("custom-default-backend-%v-%v", location.DefaultBackend.GetNamespace(), location.DefaultBackend.GetName())
@@ -1013,7 +1054,15 @@ func (n *NGINXController) createUpstreams(data []*ingress.Ingress, du *ingress.B
 					endp, err := n.serviceEndpoints(svcKey, port.String())
 					if err != nil {
 						klog.Warningf("Error obtaining Endpoints for Service %q: %v", svcKey, err)
+						n.metricCollector.IncOrphanIngress(ing.Namespace, ing.Name, orphanMetricLabelNoService)
 						continue
+					}
+					n.metricCollector.DecOrphanIngress(ing.Namespace, ing.Name, orphanMetricLabelNoService)
+
+					if len(endp) == 0 {
+						n.metricCollector.IncOrphanIngress(ing.Namespace, ing.Name, orphanMetricLabelNoEndpoint)
+					} else {
+						n.metricCollector.DecOrphanIngress(ing.Namespace, ing.Name, orphanMetricLabelNoEndpoint)
 					}
 					upstreams[name].Endpoints = endp
 				}
@@ -1078,9 +1127,13 @@ func (n *NGINXController) serviceEndpoints(svcKey, backendPort string) ([]ingres
 	if err != nil {
 		return upstreams, err
 	}
-
+	var zone string
+	if n.cfg.EnableTopologyAwareRouting {
+		zone = getIngressPodZone(svc)
+	} else {
+		zone = emptyZone
+	}
 	klog.V(3).Infof("Obtaining ports information for Service %q", svcKey)
-
 	// Ingress with an ExternalName Service and no port defined for that Service
 	if svc.Spec.Type == apiv1.ServiceTypeExternalName {
 		if n.cfg.DisableServiceExternalName {
@@ -1088,7 +1141,7 @@ func (n *NGINXController) serviceEndpoints(svcKey, backendPort string) ([]ingres
 			return upstreams, nil
 		}
 		servicePort := externalNamePorts(backendPort, svc)
-		endps := getEndpoints(svc, servicePort, apiv1.ProtocolTCP, n.store.GetServiceEndpoints)
+		endps := getEndpointsFromSlices(svc, servicePort, apiv1.ProtocolTCP, zone, n.store.GetServiceEndpointsSlices)
 		if len(endps) == 0 {
 			klog.Warningf("Service %q does not have any active Endpoint.", svcKey)
 			return upstreams, nil
@@ -1105,7 +1158,7 @@ func (n *NGINXController) serviceEndpoints(svcKey, backendPort string) ([]ingres
 			servicePort.TargetPort.String() == backendPort ||
 			servicePort.Name == backendPort {
 
-			endps := getEndpoints(svc, &servicePort, apiv1.ProtocolTCP, n.store.GetServiceEndpoints)
+			endps := getEndpointsFromSlices(svc, &servicePort, apiv1.ProtocolTCP, zone, n.store.GetServiceEndpointsSlices)
 			if len(endps) == 0 {
 				klog.Warningf("Service %q does not have any active Endpoint.", svcKey)
 			}
@@ -1206,17 +1259,15 @@ func (n *NGINXController) createServers(data []*ingress.Ingress,
 				// use backend specified in Ingress as the default backend for all its rules
 				un = backendUpstream.Name
 
-				// special "catch all" case, Ingress with a backend but no rule
 				defLoc := servers[defServerName].Locations[0]
-				defLoc.Backend = backendUpstream.Name
-				defLoc.Service = backendUpstream.Service
-				defLoc.Ingress = ing
-
 				if defLoc.IsDefBackend && len(ing.Spec.Rules) == 0 {
 					klog.V(2).Infof("Ingress %q defines a backend but no rule. Using it to configure the catch-all server %q", ingKey, defServerName)
 
 					defLoc.IsDefBackend = false
-
+					// special "catch all" case, Ingress with a backend but no rule
+					defLoc.Backend = backendUpstream.Name
+					defLoc.Service = backendUpstream.Service
+					defLoc.Ingress = ing
 					// TODO: Redirect and rewrite can affect the catch all behavior, skip for now
 					originalRedirect := defLoc.Redirect
 					originalRewrite := defLoc.Rewrite
@@ -1412,6 +1463,7 @@ func locationApplyAnnotations(loc *ingress.Location, anns *annotations.Ingress) 
 	loc.Redirect = anns.Redirect
 	loc.Rewrite = anns.Rewrite
 	loc.UpstreamVhost = anns.UpstreamVhost
+	loc.Denylist = anns.Denylist
 	loc.Whitelist = anns.Whitelist
 	loc.Denied = anns.Denied
 	loc.XForwardedPrefix = anns.XForwardedPrefix
@@ -1620,91 +1672,6 @@ func extractTLSSecretName(host string, ing *ingress.Ingress,
 	}
 
 	return ""
-}
-
-// getRemovedHosts returns a list of the hostnames
-// that are not associated anymore to the NGINX configuration.
-func getRemovedHosts(rucfg, newcfg *ingress.Configuration) []string {
-	old := sets.NewString()
-	new := sets.NewString()
-
-	for _, s := range rucfg.Servers {
-		if !old.Has(s.Hostname) {
-			old.Insert(s.Hostname)
-		}
-	}
-
-	for _, s := range newcfg.Servers {
-		if !new.Has(s.Hostname) {
-			new.Insert(s.Hostname)
-		}
-	}
-
-	return old.Difference(new).List()
-}
-
-func getRemovedCertificateSerialNumbers(rucfg, newcfg *ingress.Configuration) []string {
-	oldCertificates := sets.NewString()
-	newCertificates := sets.NewString()
-
-	for _, server := range rucfg.Servers {
-		if server.SSLCert == nil {
-			continue
-		}
-		identifier := server.SSLCert.Identifier()
-		if identifier != "" {
-			if !oldCertificates.Has(identifier) {
-				oldCertificates.Insert(identifier)
-			}
-		}
-	}
-
-	for _, server := range newcfg.Servers {
-		if server.SSLCert == nil {
-			continue
-		}
-		identifier := server.SSLCert.Identifier()
-		if identifier != "" {
-			if !newCertificates.Has(identifier) {
-				newCertificates.Insert(identifier)
-			}
-		}
-	}
-
-	return oldCertificates.Difference(newCertificates).List()
-}
-
-func getRemovedIngresses(rucfg, newcfg *ingress.Configuration) []string {
-	oldIngresses := sets.NewString()
-	newIngresses := sets.NewString()
-
-	for _, server := range rucfg.Servers {
-		for _, location := range server.Locations {
-			if location.Ingress == nil {
-				continue
-			}
-
-			ingKey := k8s.MetaNamespaceKey(location.Ingress)
-			if !oldIngresses.Has(ingKey) {
-				oldIngresses.Insert(ingKey)
-			}
-		}
-	}
-
-	for _, server := range newcfg.Servers {
-		for _, location := range server.Locations {
-			if location.Ingress == nil {
-				continue
-			}
-
-			ingKey := k8s.MetaNamespaceKey(location.Ingress)
-			if !newIngresses.Has(ingKey) {
-				newIngresses.Insert(ingKey)
-			}
-		}
-	}
-
-	return oldIngresses.Difference(newIngresses).List()
 }
 
 // checks conditions for whether or not an upstream should be created for a custom default backend

@@ -62,8 +62,9 @@ The following table shows a configuration option's name, type, and the default v
 |[hsts-max-age](#hsts-max-age)|string|"15724800"|
 |[hsts-preload](#hsts-preload)|bool|"false"|
 |[keep-alive](#keep-alive)|int|75|
-|[keep-alive-requests](#keep-alive-requests)|int|100|
+|[keep-alive-requests](#keep-alive-requests)|int|1000|
 |[large-client-header-buffers](#large-client-header-buffers)|string|"4 8k"|
+|[log-format-escape-none](#log-format-escape-none)|bool|"false"|
 |[log-format-escape-json](#log-format-escape-json)|bool|"false"|
 |[log-format-upstream](#log-format-upstream)|string|`$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent "$http_referer" "$http_user_agent" $request_length $request_time [$proxy_upstream_name] [$proxy_alternative_upstream_name] $upstream_addr $upstream_response_length $upstream_response_time $upstream_status $req_id`|
 |[log-format-stream](#log-format-stream)|string|`[$remote_addr] [$time_local] $protocol $status $bytes_sent $bytes_received $session_time`|
@@ -102,7 +103,9 @@ The following table shows a configuration option's name, type, and the default v
 |[brotli-min-length](#brotli-min-length)|int|20|
 |[brotli-types](#brotli-types)|string|"application/xml+rss application/atom+xml application/javascript application/x-javascript application/json application/rss+xml application/vnd.ms-fontobject application/x-font-ttf application/x-web-app-manifest+json application/xhtml+xml application/xml font/opentype image/svg+xml image/x-icon text/css text/javascript text/plain text/x-component"|
 |[use-http2](#use-http2)|bool|"true"|
+|[gzip-disable](#gzip-disable)|string|""|
 |[gzip-level](#gzip-level)|int|1|
+|[gzip-min-length](#gzip-min-length)|int|256|
 |[gzip-types](#gzip-types)|string|"application/atom+xml application/javascript application/x-javascript application/json application/rss+xml application/vnd.ms-fontobject application/x-font-ttf application/x-web-app-manifest+json application/xhtml+xml application/xml font/opentype image/svg+xml image/x-icon text/css text/javascript text/plain text/x-component"|
 |[worker-processes](#worker-processes)|string|`<Number of CPUs>`|
 |[worker-cpu-affinity](#worker-cpu-affinity)|string|""|
@@ -175,6 +178,7 @@ The following table shows a configuration option's name, type, and the default v
 |[proxy-request-buffering](#proxy-request-buffering)|string|"on"|
 |[ssl-redirect](#ssl-redirect)|bool|"true"|
 |[force-ssl-redirect](#force-ssl-redirect)|bool|"false"|
+|[denylist-source-range](#denylist-source-range)|[]string|[]string{}|
 |[whitelist-source-range](#whitelist-source-range)|[]string|[]string{}|
 |[skip-access-log-urls](#skip-access-log-urls)|[]string|[]string{}|
 |[limit-rate](#limit-rate)|int|0|
@@ -211,6 +215,7 @@ The following table shows a configuration option's name, type, and the default v
 |[global-rate-limit-status-code](#global-rate-limit)|int|429|
 |[service-upstream](#service-upstream)|bool|"false"|
 |[ssl-reject-handshake](#ssl-reject-handshake)|bool|"false"|
+|[debug-connections](#debug-connections)|[]string|"127.0.0.1,1.1.1.1/24"|
 
 ## add-headers
 
@@ -371,6 +376,9 @@ _References:_
 
 ## http2-max-field-size
 
+!!! warning
+    This feature was deprecated in 1.1.3 and will be removed in 1.3.0. Use [large-client-header-buffers](#large-client-header-buffers) instead.
+
 Limits the maximum size of an HPACK-compressed request header field.
 
 _References:_
@@ -378,12 +386,18 @@ _References:_
 
 ## http2-max-header-size
 
+!!! warning
+    This feature was deprecated in 1.1.3 and will be removed in 1.3.0. Use [large-client-header-buffers](#large-client-header-buffers) instead.
+
 Limits the maximum size of the entire request header list after HPACK decompression.
 
 _References:_
 [https://nginx.org/en/docs/http/ngx_http_v2_module.html#http2_max_header_size](https://nginx.org/en/docs/http/ngx_http_v2_module.html#http2_max_header_size)
 
 ## http2-max-requests
+
+!!! warning
+    This feature was deprecated in 1.1.3 and will be removed in 1.3.0. Use [upstream-keepalive-requests](#upstream-keepalive-requests) instead.
 
 Sets the maximum number of requests (including push requests) that can be served through one HTTP/2 connection, after which the next client request will lead to connection closing and the need of establishing a new connection.
 
@@ -421,7 +435,7 @@ Enables or disables the preload attribute in the HSTS feature (when it is enable
 
 ## keep-alive
 
-Sets the time during which a keep-alive client connection will stay open on the server side. The zero value disables keep-alive client connections.
+Sets the time, in seconds, during which a keep-alive client connection will stay open on the server side. The zero value disables keep-alive client connections.
 
 _References:_
 [https://nginx.org/en/docs/http/ngx_http_core_module.html#keepalive_timeout](https://nginx.org/en/docs/http/ngx_http_core_module.html#keepalive_timeout)
@@ -458,6 +472,10 @@ Sets the maximum number and size of buffers used for reading large client reques
 _References:_
 [https://nginx.org/en/docs/http/ngx_http_core_module.html#large_client_header_buffers](https://nginx.org/en/docs/http/ngx_http_core_module.html#large_client_header_buffers)
 
+## log-format-escape-none
+
+Sets if the escape parameter is disabled entirely for character escaping in variables ("true") or controlled by log-format-escape-json ("false") Sets the nginx [log format](https://nginx.org/en/docs/http/ngx_http_log_module.html#log_format).
+
 ## log-format-escape-json
 
 Sets if the escape parameter allows JSON ("true") or default characters escaping in variables ("false") Sets the nginx [log format](https://nginx.org/en/docs/http/ngx_http_log_module.html#log_format).
@@ -469,7 +487,7 @@ Example for json output:
 
 ```json
 
-log-format-upstream: '{"time": "$time_iso8601", "remote_addr": "$proxy_protocol_addr", "x_forward_for": "$proxy_add_x_forwarded_for", "request_id": "$req_id",
+log-format-upstream: '{"time": "$time_iso8601", "remote_addr": "$proxy_protocol_addr", "x_forwarded_for": "$proxy_add_x_forwarded_for", "request_id": "$req_id",
   "remote_user": "$remote_user", "bytes_sent": $bytes_sent, "request_time": $request_time, "status": $status, "vhost": "$host", "request_proto": "$server_protocol",
   "path": "$uri", "request_query": "$args", "request_length": $request_length, "duration": $request_time,"method": "$request_method", "http_referrer": "$http_referer",
   "http_user_agent": "$http_user_agent" }'
@@ -677,7 +695,8 @@ _**default:**_ false
 ## enable-brotli
 
 Enables or disables compression of HTTP responses using the ["brotli" module](https://github.com/google/ngx_brotli).
-The default mime type list to compress is: `application/xml+rss application/atom+xml application/javascript application/x-javascript application/json application/rss+xml application/vnd.ms-fontobject application/x-font-ttf application/x-web-app-manifest+json application/xhtml+xml application/xml font/opentype image/svg+xml image/x-icon text/css text/plain text/x-component`. _**default:**_ is disabled
+The default mime type list to compress is: `application/xml+rss application/atom+xml application/javascript application/x-javascript application/json application/rss+xml application/vnd.ms-fontobject application/x-font-ttf application/x-web-app-manifest+json application/xhtml+xml application/xml font/opentype image/svg+xml image/x-icon text/css text/plain text/x-component`. 
+_**default:**_ false
 
 > __Note:__ Brotli does not works in Safari < 11. For more information see [https://caniuse.com/#feat=brotli](https://caniuse.com/#feat=brotli)
 
@@ -697,6 +716,10 @@ _**default:**_ `application/xml+rss application/atom+xml application/javascript 
 ## use-http2
 
 Enables or disables [HTTP/2](https://nginx.org/en/docs/http/ngx_http_v2_module.html) support in secure connections.
+
+## gzip-disable
+
+Disables [gzipping](http://nginx.org/en/docs/http/ngx_http_gzip_module.html#gzip_disable) of responses for requests with "User-Agent" header fields matching any of the specified regular expressions.
 
 ## gzip-level
 
@@ -1081,6 +1104,11 @@ _**default:**_ "true"
 Sets the global value of redirects (308) to HTTPS if the server has a default TLS certificate (defined in extra-args).
 _**default:**_ "false"
 
+## denylist-source-range
+
+Sets the default denylisted IPs for each `server` block. This can be overwritten by an annotation on an Ingress rule.
+See [ngx_http_access_module](https://nginx.org/en/docs/http/ngx_http_access_module.html).
+
 ## whitelist-source-range
 
 Sets the default whitelisted IPs for each `server` block. This can be overwritten by an annotation on an Ingress rule.
@@ -1206,7 +1234,7 @@ _**default:**_ ""
 ## global-auth-snippet
 
 Sets a custom snippet to use with external authentication. Applied to all the locations.
-Similar to the Ingress rule annotation `nginx.ingress.kubernetes.io/auth-request-redirect`.
+Similar to the Ingress rule annotation `nginx.ingress.kubernetes.io/auth-snippet`.
 _**default:**_ ""
 
 ## global-auth-cache-key
@@ -1216,6 +1244,11 @@ Enables caching for global auth requests. Specify a lookup key for auth response
 ## global-auth-cache-duration
 
 Set a caching time for auth responses based on their response codes, e.g. `200 202 30m`. See [proxy_cache_valid](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_cache_valid) for details. You may specify multiple, comma-separated values: `200 202 10m, 401 5m`. defaults to `200 202 401 5m`.
+
+## global-auth-always-set-cookie
+
+Always set a cookie returned by auth request. By default, the cookie will be set only if an upstream reports with the code 200, 201, 204, 206, 301, 302, 303, 304, 307, or 308.
+_**default:**_ false
 
 ## no-auth-locations
 
@@ -1286,3 +1319,10 @@ _**default:**_ "false"
 
 _References:_
 [https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_reject_handshake](https://nginx.org/en/docs/http/ngx_http_ssl_module.html#ssl_reject_handshake)
+
+## debug-connections
+Enables debugging log for selected client connections.
+_**default:**_ ""
+
+_References:_
+[http://nginx.org/en/docs/ngx_core_module.html#debug_connection](http://nginx.org/en/docs/ngx_core_module.html#debug_connection)
