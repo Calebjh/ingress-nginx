@@ -38,10 +38,11 @@ build: ensure-buildx
 	docker buildx build \
 		--platform=${PLATFORMS} $(OUTPUT) \
 		--progress=$(PROGRESS) \
+		--pull \
 		--tag $(IMAGE):$(TAG) rootfs
 
 # push the cross built image
-push: OUTPUT=--push
+push: OUTPUT=--load
 push: build
 
 # enable buildx
