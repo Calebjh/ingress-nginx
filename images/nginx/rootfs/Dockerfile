@@ -83,6 +83,4 @@ RUN yum -y install -y https://dl.fedoraproject.org/pub/epel/epel-release-latest-
 
 EXPOSE 80 443
 
-ENTRYPOINT ["/usr/local/entrypoint.sh"]
-
 CMD ["nginx", "-g", "daemon off;"]
