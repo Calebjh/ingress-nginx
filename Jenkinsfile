@@ -18,6 +18,7 @@ pipeline {
     REGISTRY = 'infoblox'
     IMAGE_NAME = 'nginx-fips'
     PLATFORMS = 'linux/amd64'
+    BUILDX_PLATFORMS = 'linux/amd64'
     ARCH = 'amd64'
     BASE_IMAGE = "${REGISTRY}/${env.IMAGE_NAME}:${TAG}"
     DOCKER_CLI_EXPERIMENTAL = 'enabled'
